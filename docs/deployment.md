@@ -116,6 +116,49 @@ Optionally front it with **Cloudflare Access** for a second, identity-aware auth
   claude mcp add tunnel -- /usr/local/bin/tunnel-mcp --workspace /home/agent/work --permissions /etc/tunnel-mcp/permissions.json
   ```
 
+## 4b. Deploying on an exe.dev VM
+
+An [exe.dev](https://exe.dev) box already provides the "VM behind a TLS tunnel" shape, so you can skip Cloudflare entirely. The exe.dev edge at `https://<vm>.exe.xyz/` terminates TLS and forwards to a port on the VM, and — critically — it is an **identity gate**:
+
+- **Private by default:** only users with access to the VM can reach the proxy; a first request is redirected to log into exe.dev (OIDC). `ssh exe.dev share set-public <vm>` opens it to the internet; `set-private` reverts.
+- On authenticated requests, the edge injects `X-ExeDev-UserID` and `X-ExeDev-Email` headers (overwriting any client-supplied copy).
+- The forwarded port defaults to the lowest `EXPOSE`d TCP port; set it explicitly with `ssh exe.dev share port <vm> 8080`.
+
+### Model A — edge identity is the auth boundary (best for desktop / browser MCP)
+
+Keep the VM **private** and let exe.dev SSO gate the edge; tunnel-mcp pins to your address via the injected header. No bearer token to manage.
+
+```sh
+tunnel-mcp \
+  --http 127.0.0.1:8080 \
+  --workspace /home/agent/work \
+  --permissions /etc/tunnel-mcp/permissions.json \
+  --owner-email you@example.com          # require X-ExeDev-Email == this
+ssh exe.dev share port <vm> 8080
+```
+
+`--owner-email` makes `/mcp` require the exe.dev identity header to equal your address: a missing header is `401` (the request didn't come through the authenticating edge), a different authenticated user is `403`.
+
+**Safety rule:** bind `--http` to `127.0.0.1` so the exe.dev edge is the *only* path to tunnel-mcp. The header is trustworthy only because the edge overwrites it; if the process were reachable directly, a client could spoof `X-ExeDev-Email`. Do **not** rely on `--owner-email` alone once the VM is `set-public` (the edge no longer injects identity there) — add `--token` for that case.
+
+### Model B — bearer token is the boundary (needed for the phone app)
+
+The phone app's remote-MCP connector is a programmatic client sending `Authorization: Bearer …`; it can't complete the edge's interactive browser login. Two options:
+
+1. Keep the VM private and put exe's programmatic OIDC proxy, [`exe-oidc-proxy`](https://pkg.go.dev/github.com/boldsoftware/exe-oidc-proxy), in front of tunnel-mcp.
+2. `ssh exe.dev share set-public <vm>` and let tunnel-mcp's `--token` be the gate:
+
+```sh
+tunnel-mcp --http 127.0.0.1:8080 --workspace /home/agent/work \
+  --permissions /etc/tunnel-mcp/permissions.json --token-file /etc/tunnel-mcp/token
+```
+
+### Recommended: both layers
+
+`--token` and `--owner-email` compose — supply both and a request must satisfy *both* the bearer check and the owner-identity check (bearer is checked first). Keeping the VM private (edge SSO) *and* requiring the bearer *and* pinning the owner means two independent failures are needed before any tool runs.
+
+> Verify first whether your Claude surface's MCP connector can authenticate to a **private** exe.dev box (via `exe-oidc-proxy` or an OAuth flow it supports). If yes, keep it private (Model A). If no — as with the phone app today — use `set-public` + bearer (Model B).
+
 ## 5. Egress hardening (recommended)
 
 Bound exfiltration if a prompt-injected session goes rogue: deny-by-default egress for the `agent` UID, allowlisting only package registries and GitHub.
