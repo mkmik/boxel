@@ -1,0 +1,30 @@
+{
+  "_comment": "Server-side permission policy for tunnel-mcp. Claude Code settings.json compatible. Precedence: deny > ask > allow. Rules are Tool or Tool(specifier). Bash specifiers match the command line ('git *' glob, or 'git commit:*' prefix form); path-tool specifiers (Read/Write/Edit/Glob/Grep) are doublestar globs over the resolved absolute path, relative to the workspace when not absolute.",
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Glob(**)",
+      "Grep(**)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(go build:*)",
+      "Bash(go test:*)",
+      "Edit(**)",
+      "Write(**)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(git commit:*)",
+      "Bash(rm *)",
+      "Bash(curl *)",
+      "Bash(wget *)"
+    ],
+    "deny": [
+      "Bash(sudo *)",
+      "Bash(:(){ :|:& };:)"
+    ]
+  }
+}
