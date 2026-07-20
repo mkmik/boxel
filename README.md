@@ -72,7 +72,10 @@ The MCP endpoint is `POST /mcp` (requires `Authorization: Bearer <token>`); `GET
 | `--audit-log` | *(disabled)* | Append-only JSONL audit log path. |
 | `--metrics-addr` | *(disabled)* | Serve Prometheus `/metrics` on this address. |
 | `--token` / `--token-file` | `$BOXEL_TOKEN` | Static bearer token for HTTP (testing; front with OAuth for production). |
+| `--owner-email` | *(none)* | Pin to one owner via the exe.dev edge: require the `X-ExeDev-Email` header to equal this address. Composes with `--token`. See [`docs/deployment.md`](docs/deployment.md). |
 | `--session-ttl` | `24h` | Idle-session GC TTL (`0` disables). |
+
+For HTTP, at least one of `--token` / `--owner-email` must be set — the server refuses to listen unauthenticated.
 
 ## Permissions
 
