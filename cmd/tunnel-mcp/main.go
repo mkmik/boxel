@@ -146,7 +146,7 @@ func run(o opts) error {
 	if err != nil {
 		return err
 	}
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
+	handler := newStreamableHandler(srv)
 	guarded, authDesc, err := authMiddleware(bearer, o.ownerEmail, handler)
 	if err != nil {
 		return err
@@ -170,6 +170,21 @@ func run(o opts) error {
 		return err
 	}
 	return nil
+}
+
+// newStreamableHandler builds the streamable HTTP MCP handler.
+//
+// The SDK's automatic DNS-rebinding protection 403s any request whose Host
+// header is not loopback when the listener is bound to loopback — which is
+// precisely the recommended deployment (bind 127.0.0.1 behind a
+// TLS-terminating proxy that forwards the public Host). A rebinding attack is
+// already dead on arrival here: the HTTP transport refuses to start without
+// auth, and a browser cannot attach the bearer token or the edge identity
+// header cross-origin without a CORS preflight we never approve.
+func newStreamableHandler(srv *mcp.Server) http.Handler {
+	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{
+		DisableLocalhostProtection: true,
+	})
 }
 
 func resolveToken(token, tokenFile string) (string, error) {

@@ -1,9 +1,13 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func okHandler() http.Handler {
@@ -22,6 +26,34 @@ func do(t *testing.T, h http.Handler, headers map[string]string) int {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec.Code
+}
+
+// Regression test: the SDK's localhost DNS-rebinding protection must not 403
+// requests that arrive on a loopback listener with the public Host header a
+// fronting proxy (exe.dev, cloudflared) forwards.
+func TestStreamableHandlerAcceptsForwardedPublicHost(t *testing.T) {
+	h := newStreamableHandler(mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil))
+	ts := httptest.NewServer(h) // binds 127.0.0.1
+	defer ts.Close()
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`
+	req, err := http.NewRequest(http.MethodPost, ts.URL, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "boxel.example.com"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("initialize with public Host: code %d, body %q", resp.StatusCode, b)
+	}
 }
 
 func TestAuthMiddlewareRefusesUnauthenticated(t *testing.T) {
