@@ -127,6 +127,13 @@ func NewEngine(cfg Config, mode Mode, workspaceRoot string) (*Engine, error) {
 		return nil, fmt.Errorf("policy: resolving workspace root %q: %w", workspaceRoot, err)
 	}
 	root = filepath.Clean(root)
+	// Resolve symlinks in the root so it is compared in the same (real) space
+	// as realPath(callPath); otherwise a symlinked workspace (e.g. a temp dir
+	// under /var -> /private/var) would make every in-jail path look outside.
+	// Best-effort: a not-yet-existing root keeps its lexical form.
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
 	deny, err := ParseRules(cfg.Permissions.Deny, Deny)
 	if err != nil {
 		return nil, err
@@ -166,25 +173,33 @@ func (e *Engine) WorkspaceRoot() string { return e.workspaceRoot }
 // Evaluate decides allow/ask/deny for a tool call.
 func (e *Engine) Evaluate(call ToolCall, overlay *Overlay) Decision {
 	// 1a. Hard deny: workspace jail. Applies even in bypassPermissions.
+	// The check is done in real (symlink-resolved) space on both sides:
+	// realPath resolves both ".." traversal and symlinked parents, so a
+	// symlink such as /work/link -> / cannot disguise an outside target as
+	// being inside the jail.
 	for _, p := range call.Paths {
-		cp := filepath.Clean(p)
-		if !pathWithin(cp, e.workspaceRoot) {
+		rp := realPath(filepath.Clean(p))
+		if !pathWithin(rp, e.workspaceRoot) {
 			return Decision{
 				Behavior: Deny,
 				Rule:     "builtin:jail",
-				Reason:   fmt.Sprintf("path %s is outside the sandbox workspace %s", cp, e.workspaceRoot),
+				Reason:   fmt.Sprintf("path %s is outside the sandbox workspace %s", rp, e.workspaceRoot),
 			}
 		}
 	}
 	// 1b. Hard deny: credential paths, unless explicitly allowlisted by a
-	// persistent (non-overlay, non-catch-all) config allow rule.
+	// persistent (non-overlay, non-catch-all) config allow rule. Check both
+	// the lexical and real paths so a symlink can't route around the patterns.
 	for _, p := range call.Paths {
 		cp := filepath.Clean(p)
-		if e.isCredentialPath(cp) && !e.credentialAllowlisted(cp) {
-			return Decision{
-				Behavior: Deny,
-				Rule:     "builtin:credentials",
-				Reason:   fmt.Sprintf("credential path %s is blocked (add an explicit allow rule to permit)", cp),
+		rp := realPath(cp)
+		if e.isCredentialPath(cp) || e.isCredentialPath(rp) {
+			if !e.credentialAllowlisted(cp) {
+				return Decision{
+					Behavior: Deny,
+					Rule:     "builtin:credentials",
+					Reason:   fmt.Sprintf("credential path %s is blocked (add an explicit allow rule to permit)", cp),
+				}
 			}
 		}
 	}

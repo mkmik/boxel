@@ -100,6 +100,13 @@ The generic `invoke` op is, by construction, an **authenticated RCE endpoint** â
 - Deny-by-default egress from the sandbox user (e.g. nftables per-UID) with a registry/GitHub allowlist, to bound exfiltration if a prompt-injected session goes rogue.
 - Every mutation is recorded in the audit log with an input digest and the permission decision; **file contents are never logged**, and Bash command lines flagged sensitive are redacted.
 
+### Known limitations of the policy layer
+
+The permission engine is defense in depth, not the perimeter â€” deploy the OS-level isolation in [`docs/deployment.md`](docs/deployment.md). Specifically:
+
+- **`Bash` is unrestricted RCE by design.** A Bash command carries no filesystem path for the engine to jail-check, so `cat /etc/shadow` is reachable subject only to Bash rule/mode gating (in `default` mode it prompts). The jail and credential hard-denies apply to the *file tools* (Read/Write/Edit/Glob/Grep), not to what a shell command can do. Egress deny + OS sandboxing are what actually contain a shell.
+- **Symlink resolution is best-effort.** File-tool paths are resolved (symlinks followed) before the jail/credential check, so a symlinked parent inside the workspace can't disguise an outside target. This is not TOCTOU-proof against a path swapped between check and use; a landlock/bind-mount jail is.
+
 See [`docs/deployment.md`](docs/deployment.md) for a systemd unit and Cloudflare Tunnel walkthrough.
 
 ## Development

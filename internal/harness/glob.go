@@ -25,19 +25,32 @@ func init() {
 	register("Glob", globTool)
 }
 
-func globTool(_ context.Context, hctx *Context, input any) (*Result, error) {
-	in := input.(*envelope.GlobInput)
+// GlobSearchRoot returns the directory Glob will actually walk for the given
+// input: the static prefix of an absolute pattern, otherwise the input path
+// resolved against the session cwd. The permission engine must authorize this
+// same root — not in.Path — or an absolute pattern escapes the jail.
+func GlobSearchRoot(hctx *Context, in *envelope.GlobInput) string {
+	root, _ := globRootAndPattern(hctx, in)
+	return root
+}
 
-	pattern := in.Pattern
-	var root string
+// globRootAndPattern splits an input into the search root and the pattern to
+// match relative to it.
+func globRootAndPattern(hctx *Context, in *envelope.GlobInput) (root, pattern string) {
+	pattern = in.Pattern
 	if filepath.IsAbs(pattern) {
 		// Absolute pattern: split its static prefix off as the search root
 		// and match the remainder relative to it.
 		root, pattern = doublestar.SplitPattern(filepath.ToSlash(pattern))
-		root = filepath.Clean(filepath.FromSlash(root))
-	} else {
-		root = hctx.Abs(in.Path)
+		return filepath.Clean(filepath.FromSlash(root)), pattern
 	}
+	return hctx.Abs(in.Path), pattern
+}
+
+func globTool(_ context.Context, hctx *Context, input any) (*Result, error) {
+	in := input.(*envelope.GlobInput)
+
+	root, pattern := globRootAndPattern(hctx, in)
 
 	if _, err := doublestar.Match(pattern, "probe"); err != nil {
 		return Errorf("Invalid glob pattern: %v", err), nil

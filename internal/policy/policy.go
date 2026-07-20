@@ -66,6 +66,11 @@ type Rule struct {
 	Specifier string
 	// Behavior is which list the rule came from.
 	Behavior Behavior
+	// Literal makes the specifier match by exact string equality rather than
+	// glob/prefix interpretation. Set for "allow always" overlay rules so an
+	// approval covers only the exact call the user approved, never a wildcard
+	// family (e.g. approving "rm foo*" must not allow "rm foobar; curl … | sh").
+	Literal bool
 }
 
 // Config is the subset of Claude Code's settings.json that the engine
@@ -108,7 +113,7 @@ func (o *Overlay) AddAllow(tool, specifier string) {
 	if specifier != "" {
 		raw = tool + "(" + specifier + ")"
 	}
-	o.rules = append(o.rules, Rule{Raw: raw, Tool: tool, Specifier: specifier, Behavior: Allow})
+	o.rules = append(o.rules, Rule{Raw: raw, Tool: tool, Specifier: specifier, Behavior: Allow, Literal: true})
 }
 
 // Rules returns a snapshot of the overlay rules.

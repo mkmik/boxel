@@ -263,9 +263,20 @@ func TestEvaluateOverlay(t *testing.T) {
 	checkDecision(t, decide(t, e, call, nil), Ask, "mode:default")
 	checkDecision(t, decide(t, e, call, NewOverlay()), Ask, "mode:default")
 
-	ov := NewOverlay()
-	ov.AddAllow("Bash", "make *")
-	checkDecision(t, decide(t, e, call, ov), Allow, "Bash(make *)")
+	// Overlay ("allow always") rules match by exact string, not as a glob, so
+	// an approval covers only the exact command the user approved.
+	ovExact := NewOverlay()
+	ovExact.AddAllow("Bash", "make build")
+	checkDecision(t, decide(t, e, call, ovExact), Allow, "Bash(make build)")
+
+	// A literal overlay specifier does NOT broaden to a wildcard family: a
+	// stored "make *" only allows the literal command "make *".
+	ovGlob := NewOverlay()
+	ovGlob.AddAllow("Bash", "make *")
+	checkDecision(t, decide(t, e, call, ovGlob), Ask, "mode:default")
+	checkDecision(t, decide(t, e, ToolCall{Tool: "Bash", Command: "make *"}, ovGlob), Allow, "Bash(make *)")
+
+	ov := ovExact // reused below for precedence checks
 
 	// Config allow rules are consulted before the overlay.
 	ec := mustEngine(t, cfgWith([]string{"Bash(make build)"}, nil, nil), ModeDefault, "/work")

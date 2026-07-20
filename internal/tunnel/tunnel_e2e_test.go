@@ -276,6 +276,25 @@ func TestE2EJailDeny(t *testing.T) {
 	}
 }
 
+// TestE2EGlobAbsolutePatternJailed is the regression for the Glob
+// absolute-pattern jail bypass: a pattern rooted outside the workspace must be
+// denied even though in.Path is empty (the search root comes from the pattern).
+func TestE2EGlobAbsolutePatternJailed(t *testing.T) {
+	ws := t.TempDir()
+	cfg := newCfg(t, ws, policy.ModeDefault, policy.Config{})
+	cs, ctx := connect(t, cfg, nil)
+	res := invoke(t, cs, ctx, "Glob", map[string]any{"pattern": "/etc/**"}, "")
+	if !res.IsError || !strings.Contains(resultText(t, res), "builtin:jail") {
+		t.Fatalf("absolute Glob pattern not jailed, got: %s", resultText(t, res))
+	}
+	// An in-jail absolute pattern still works.
+	os.WriteFile(filepath.Join(ws, "x.go"), []byte("package x\n"), 0o644)
+	res = invoke(t, cs, ctx, "Glob", map[string]any{"pattern": filepath.Join(ws, "**", "*.go")}, "")
+	if res.IsError {
+		t.Fatalf("in-jail absolute Glob denied: %s", resultText(t, res))
+	}
+}
+
 // TestE2EUnknownTool verifies the structured unknown_tool error.
 func TestE2EUnknownTool(t *testing.T) {
 	ws := t.TempDir()

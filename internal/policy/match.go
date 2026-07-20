@@ -12,6 +12,33 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 )
 
+// realPath resolves symlinks in cleaned path p for jail/credential checks.
+// The leaf may not exist yet (e.g. a Write target), so it resolves the
+// longest existing ancestor with filepath.EvalSymlinks and rejoins the
+// non-existent tail. If nothing can be resolved it returns p unchanged, so
+// the lexical checks still apply. This closes the gap where a symlinked
+// parent directory (e.g. /work/link -> /) makes an outside target look like
+// it is inside the jail. It is best-effort defense in depth, not a TOCTOU-
+// proof perimeter — OS-level isolation remains the real boundary (PRD §8).
+func realPath(p string) string {
+	rest := ""
+	cur := p
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			if rest == "" {
+				return resolved
+			}
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p // reached the root without resolving anything
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
+}
+
 // pathWithin reports whether cleaned path p is root itself or lives under
 // root, using a path-separator boundary (so /work2 is not inside /work).
 // Both arguments must already be filepath.Clean'ed.
@@ -94,6 +121,26 @@ func (e *Engine) ruleMatches(r Rule, call ToolCall) bool {
 	spec := strings.TrimSpace(r.Specifier)
 	if spec == "" {
 		return true // bare "Tool" matches every call of that tool
+	}
+	if r.Literal {
+		// Exact-match rule (e.g. an "allow always" overlay entry): the
+		// specifier is a concrete command or path, never a glob.
+		switch r.Tool {
+		case "Bash":
+			return spec == strings.TrimSpace(call.Command)
+		case "Read", "Write", "Edit", "Glob", "Grep":
+			if len(call.Paths) == 0 {
+				return false
+			}
+			for _, p := range call.Paths {
+				if filepath.Clean(p) != filepath.Clean(spec) {
+					return false
+				}
+			}
+			return true
+		default:
+			return false
+		}
 	}
 	switch r.Tool {
 	case "Bash":

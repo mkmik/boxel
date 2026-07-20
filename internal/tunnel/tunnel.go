@@ -118,7 +118,9 @@ func toolCallFor(tool string, typed any, sess *session.Session) policy.ToolCall 
 	case *envelope.EditInput:
 		call.Paths = []string{hctx.Abs(in.FilePath)}
 	case *envelope.GlobInput:
-		call.Paths = []string{hctx.Abs(in.Path)}
+		// Authorize the directory Glob actually walks: an absolute pattern's
+		// search root is derived from the pattern, not in.Path.
+		call.Paths = []string{harness.GlobSearchRoot(hctx, in)}
 	case *envelope.GrepInput:
 		call.Paths = []string{hctx.Abs(in.Path)}
 	case *envelope.BashOutputInput, *envelope.KillShellInput:
