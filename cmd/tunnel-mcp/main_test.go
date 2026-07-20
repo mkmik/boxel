@@ -57,16 +57,17 @@ func TestStreamableHandlerAcceptsForwardedPublicHost(t *testing.T) {
 }
 
 func TestAuthMiddlewareRefusesUnauthenticated(t *testing.T) {
-	if _, _, err := authMiddleware("", "", okHandler()); err == nil {
+	if _, _, _, err := authLayers("", ""); err == nil {
 		t.Fatal("expected error when no auth is configured")
 	}
 }
 
 func TestAuthMiddlewareBearerOnly(t *testing.T) {
-	h, desc, err := authMiddleware("sekret", "", okHandler())
+	wrap, ok, desc, err := authLayers("sekret", "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	h := wrap(okHandler())
 	if desc != "bearer" {
 		t.Errorf("desc = %q, want bearer", desc)
 	}
@@ -79,13 +80,23 @@ func TestAuthMiddlewareBearerOnly(t *testing.T) {
 	if code := do(t, h, nil); code != http.StatusUnauthorized {
 		t.Errorf("no bearer: code %d, want 401", code)
 	}
+	// The predicate mirrors the middleware.
+	req := httptest.NewRequest(http.MethodGet, "/install-agent", nil)
+	if ok(req) {
+		t.Error("predicate passed an unauthenticated request")
+	}
+	req.Header.Set("Authorization", "Bearer sekret")
+	if !ok(req) {
+		t.Error("predicate rejected a valid bearer")
+	}
 }
 
 func TestAuthMiddlewareExeIdentityOnly(t *testing.T) {
-	h, desc, err := authMiddleware("", "owner@example.com", okHandler())
+	wrap, _, desc, err := authLayers("", "owner@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
+	h := wrap(okHandler())
 	if desc != "exe-identity(owner@example.com)" {
 		t.Errorf("desc = %q", desc)
 	}
@@ -104,10 +115,11 @@ func TestAuthMiddlewareExeIdentityOnly(t *testing.T) {
 }
 
 func TestAuthMiddlewareBothLayers(t *testing.T) {
-	h, desc, err := authMiddleware("sekret", "owner@example.com", okHandler())
+	wrap, _, desc, err := authLayers("sekret", "owner@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
+	h := wrap(okHandler())
 	if desc != "bearer+exe-identity(owner@example.com)" {
 		t.Errorf("desc = %q", desc)
 	}

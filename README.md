@@ -74,8 +74,34 @@ The MCP endpoint is `POST /mcp` (requires `Authorization: Bearer <token>`); `GET
 | `--token` / `--token-file` | `$BOXEL_TOKEN` | Static bearer token for HTTP (testing; front with OAuth for production). |
 | `--owner-email` | *(none)* | Pin to one owner via the exe.dev edge: require the `X-ExeDev-Email` header to equal this address. Composes with `--token`. See [`docs/deployment.md`](docs/deployment.md). |
 | `--session-ttl` | `24h` | Idle-session GC TTL (`0` disables). |
+| `--hub-agent-token` / `--hub-agent-token-file` | `$BOXEL_HUB_AGENT_TOKEN` | Enable the **pull-mode hub** (see below): token agents present to register. |
+| `--hub-agent-listen` | *(disabled)* | Extra internal listener serving only the agent registration endpoint. |
+| `--hub-advertise-url` | *(fetch URL)* | Internal base URL agents dial; embedded in the `/install-agent` script. |
 
 For HTTP, at least one of `--token` / `--owner-email` must be set — the server refuses to listen unauthenticated.
+
+## Pull mode: one hub, many non-routable VMs
+
+A routable boxel instance can act as a **multiplexer** for boxel instances on
+VMs with no reachable inbound port. A small agent on each VM dials *out* to
+the hub, registers under its short hostname over a reverse HTTP/2 channel, and
+the hub proxies the whole `/vm/<name>/` base path to it — so the MCP endpoint
+for VM `foobar` becomes `https://<hub>/vm/foobar/mcp`, behind the hub's own
+auth (one connector origin, one credential, whole fleet).
+
+```sh
+# hub (routable VM): add to an existing HTTP deployment
+tunnel-mcp --http 127.0.0.1:8080 ... \
+  --hub-agent-token-file /etc/tunnel-mcp/agent-token \
+  --hub-agent-listen :8081 --hub-advertise-url http://<hub-internal-dns>:8081
+
+# each non-routable VM:
+curl -fsSL https://<hub>/install-agent | sudo bash
+```
+
+The installer builds `cmd/boxel-agent` with `go install`, registers a systemd
+unit, and embeds the hub's registration URL (and, if the fetch was
+authenticated, the agent token). See [`docs/pull-mode.md`](docs/pull-mode.md).
 
 ## Permissions
 
@@ -132,4 +158,7 @@ Package layout:
 | `internal/audit` | Append-only JSONL audit log. |
 | `internal/metrics` | Prometheus instrumentation. |
 | `internal/tunnel` | MCP server wiring: envelope → policy → elicitation → harness → audit/metrics. |
-| `cmd/tunnel-mcp` | Binary: stdio + streamable HTTP transports, bearer auth, flags. |
+| `internal/hub` | Pull-mode multiplexer: agent registry, reverse HTTP/2 registration, `/vm/<name>/` proxy, installer script. |
+| `internal/hubagent` | Pull-mode agent runtime: dial-out, reconnect, forwarding to the local instance. |
+| `cmd/tunnel-mcp` | Binary: stdio + streamable HTTP transports, bearer auth, hub mode, flags. |
+| `cmd/boxel-agent` | Pull-mode agent binary for non-routable VMs. |
