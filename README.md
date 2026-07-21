@@ -22,6 +22,28 @@ Claude (phone / desktop / CLI)
       Sandbox VM filesystem + processes (workspace jail)
 ```
 
+## Quick start: join a VM to the fleet
+
+On a VM that should join an existing boxel hub (once the hub's peer
+integration is attached to the VM — `ssh exe.dev tag SOME_VM boxel`):
+
+```sh
+curl -fsSL http://boxel.int.exe.xyz/install-agent | sudo bash
+```
+
+If the integration isn't attached yet, install with a Go toolchain (≥ 1.25)
+instead — this works either way, and the agent connects automatically once
+the integration appears:
+
+```sh
+GOBIN=/usr/local/bin go install github.com/mkmik/boxel/cmd/boxel-agent@latest
+sudo /usr/local/bin/boxel-agent setup
+```
+
+To set up the hub itself, see the
+[setup runbook](#setup-runbook-exedev) under
+[Pull mode](#pull-mode-one-hub-many-non-routable-vms).
+
 ## Advertised MCP surface
 
 | Tool | Purpose |
@@ -34,7 +56,7 @@ Claude (phone / desktop / CLI)
 
 `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `BashOutput`, `KillShell` — implemented natively with **byte-exact Claude Code semantics** (identical output formats and failure-mode strings), so the model's recovery behavior transfers unchanged. Use the exact input schemas you use natively; call `describe` if unsure. Unknown tool names return `{"error": "unknown_tool", "supported": [...]}`.
 
-## Quick start
+## Running the server
 
 Build:
 
@@ -103,13 +125,13 @@ One connector origin and one credential cover the whole fleet: `/vm/…` and
 
 On exe.dev there is no VM-to-VM network; agents reach the hub through a
 **peer integration** — an exe.dev-managed proxy at
-`http://boxel-hub.int.exe.xyz/` that authenticates the calling VM to the
+`http://boxel.int.exe.xyz/` that authenticates the calling VM to the
 hub's edge and stamps the unforgeable caller VM name in `X-Exedev-Source-Vm`.
 Registration is therefore **tokenless**: the hub accepts a registration when
 the edge-injected `X-ExeDev-Email` equals `--hub-agent-owner-email`, and the
 agent's handle is taken from the verified source-VM header. Agents
 autodiscover the hub by querying the default `reflection` integration for an
-attached http-proxy integration named `boxel-hub`. (Non-exe.dev deployments
+attached http-proxy integration named `boxel`. (Non-exe.dev deployments
 use `--hub-agent-token` instead; both methods can be enabled at once.)
 
 ### Setup runbook (exe.dev)
@@ -140,7 +162,7 @@ exe.dev web UI at `/integrations`; VMs themselves normally can't run
 attached by tag:
 
 ```sh
-ssh exe.dev integrations add http-proxy --name boxel-hub \
+ssh exe.dev integrations add http-proxy --name boxel \
   --target https://HUB_VM.exe.xyz/ --peer --attach tag:boxel
 ```
 
@@ -150,13 +172,24 @@ place as step 2), and install the agent on the VM (needs a Go toolchain
 installer succeeds even while the integration is missing, and the agent
 service retries discovery every backoff cycle until it appears.
 
+From your shell (or the web UI):
+
 ```sh
-ssh exe.dev tag SOME_VM boxel               # from your shell (or the web UI)
-# on SOME_VM — works regardless of whether the integration exists yet:
+ssh exe.dev tag SOME_VM boxel
+```
+
+Then on `SOME_VM`, once the integration is attached:
+
+```sh
+curl -fsSL http://boxel.int.exe.xyz/install-agent | sudo bash
+```
+
+Equivalent manual install — works regardless of whether the integration
+exists yet:
+
+```sh
 GOBIN=/usr/local/bin go install github.com/mkmik/boxel/cmd/boxel-agent@latest
 sudo /usr/local/bin/boxel-agent setup
-# equivalent shortcut once the integration IS attached:
-#   curl -fsSL http://boxel-hub.int.exe.xyz/install-agent | sudo bash
 ```
 
 `boxel-agent setup` installs the binary, creates a `boxel-agent` system user,
@@ -205,7 +238,7 @@ The VM's own public hostname stays free: `ssh exe.dev share port SOME_VM
 
 | Symptom | Cause / fix |
 |---|---|
-| agent logs `hub autodiscovery: no http-proxy integration named "boxel-hub"` | VM not tagged (step 3) or integration missing (step 2). Discovery retries every backoff cycle, so fixing the tag is enough. |
+| agent logs `hub autodiscovery: no http-proxy integration named "boxel"` | VM not tagged (step 3) or integration missing (step 2). Discovery retries every backoff cycle, so fixing the tag is enough. |
 | agent logs `hub refused registration: 401` | Hub not started with `--hub-agent-owner-email`, or its value doesn't match the account that owns the VMs. |
 | agent registers, then the channel drops immediately after the 101 | An intermediary isn't passing the `Upgrade: boxel-h2c` handshake through — report it. |
 | `/vm/<name>/…` returns 502 `vm_not_connected` | Agent not running/registered on that VM — check step 4. |
