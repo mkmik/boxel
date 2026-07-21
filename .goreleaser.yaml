@@ -1,0 +1,63 @@
+version: 2
+
+project_name: boxel
+
+# No ldflags version plumbing: internal/version reads the build info the Go
+# toolchain embeds, and Go >= 1.24 stamps the module version from the git tag.
+builds:
+  - id: boxel-agent
+    main: ./cmd/boxel-agent
+    binary: boxel-agent
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    # No windows: internal/shellmgr relies on Unix process groups
+    # (syscall.Kill, Setpgid) and does not compile there.
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+  - id: tunnel-mcp
+    main: ./cmd/tunnel-mcp
+    binary: tunnel-mcp
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^Merge pull request"
+      - "^Merge branch"
+
+release:
+  draft: false
+  prerelease: auto
