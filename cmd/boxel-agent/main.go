@@ -16,6 +16,11 @@
 // retrying, and setup prints exactly what remains to be done (e.g. attaching
 // the exe.dev peer integration). The hub's /install-agent script is a thin
 // wrapper around `go install` + `boxel-agent setup`.
+//
+// The `update` subcommand (run as root every 5 minutes by the
+// boxel-agent-update.timer that setup installs) checks the Go module proxy
+// for a newer release and, when one exists, rebuilds the agent with `go
+// install`, replaces the binary, and restarts the service.
 package main
 
 import (
@@ -39,11 +44,19 @@ import (
 var Version = version.String()
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "setup" {
-		if err := runSetup(os.Args[2:]); err != nil {
-			log.Fatal(err)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "setup":
+			if err := runSetup(os.Args[2:]); err != nil {
+				log.Fatal(err)
+			}
+			return
+		case "update":
+			if err := runUpdate(os.Args[2:]); err != nil {
+				log.Fatal(err)
+			}
+			return
 		}
-		return
 	}
 	var (
 		hubURL          string

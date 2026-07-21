@@ -158,7 +158,14 @@ curl -fsSL https://<hub>/install-agent | sudo bash                  # generic
 3. if `/etc/tunnel-mcp/token` exists, copies it so forwarded requests
    authenticate to the local boxel instance automatically;
 4. installs and starts a hardened systemd unit (`boxel-agent.service`);
-5. reports hub reachability — and here is the unattended-install contract:
+5. installs a self-update pair (`boxel-agent-update.service` +
+   `boxel-agent-update.timer`): every 5 minutes the timer runs
+   `boxel-agent update`, which asks the Go module proxy for the latest
+   release and, when it is newer than the installed binary, rebuilds with
+   `go install`, atomically replaces `/usr/local/bin/boxel-agent`, and
+   restarts the service (source builds — non-semver versions — are never
+   clobbered, and a deliberately stopped service is not restarted);
+6. reports hub reachability — and here is the unattended-install contract:
    if the hub cannot be reached yet (peer integration not created or the VM
    not tagged), setup still **exits 0** and prints an `ACTION REQUIRED`
    block with the exact `integrations add` / `tag` commands for the account

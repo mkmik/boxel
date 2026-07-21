@@ -7,6 +7,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/prometheus/client_golang v1.24.0
 	github.com/prometheus/client_model v0.6.2
+	golang.org/x/mod v0.38.0
 	golang.org/x/net v0.57.0
 )
 
