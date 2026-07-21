@@ -50,10 +50,11 @@ type opts struct {
 	ownerEmail  string
 	sessionTTL  time.Duration
 
-	hubAgentToken     string
-	hubAgentTokenFile string
-	hubAgentListen    string
-	hubAdvertiseURL   string
+	hubAgentToken      string
+	hubAgentTokenFile  string
+	hubAgentOwnerEmail string
+	hubAgentListen     string
+	hubAdvertiseURL    string
 }
 
 func main() {
@@ -68,8 +69,9 @@ func main() {
 	flag.StringVar(&o.tokenFile, "token-file", "", "read the bearer token from this file")
 	flag.StringVar(&o.ownerEmail, "owner-email", "", "pin to a single owner via the exe.dev edge: require the X-ExeDev-Email header (injected by the exe.dev proxy) to equal this address. Bind --http to localhost so the edge is the only path in. Composes with --token.")
 	flag.DurationVar(&o.sessionTTL, "session-ttl", 24*time.Hour, "idle session garbage-collection TTL (0 disables GC)")
-	flag.StringVar(&o.hubAgentToken, "hub-agent-token", "", "enable the pull-mode hub: bearer token agents must present to register (or set BOXEL_HUB_AGENT_TOKEN); requires --http")
+	flag.StringVar(&o.hubAgentToken, "hub-agent-token", "", "enable the pull-mode hub: bearer token agents may present to register (or set BOXEL_HUB_AGENT_TOKEN); requires --http")
 	flag.StringVar(&o.hubAgentTokenFile, "hub-agent-token-file", "", "read the hub agent registration token from this file")
+	flag.StringVar(&o.hubAgentOwnerEmail, "hub-agent-owner-email", "", "enable the pull-mode hub with exe.dev identity registration: accept a registration when the X-ExeDev-Email header (injected by the exe.dev edge for peer-integration traffic) equals this address; the platform-verified X-Exedev-Source-Vm header then names the agent. Composes with --hub-agent-token as an alternative method. Bind --http to localhost so the edge is the only path in.")
 	flag.StringVar(&o.hubAgentListen, "hub-agent-listen", "", "additionally serve the agent registration endpoint ("+hub.ConnectPath+") on this address, reachable by agent VMs over the internal network (e.g. :8081)")
 	flag.StringVar(&o.hubAdvertiseURL, "hub-advertise-url", "", "base URL agents should dial to reach this hub (internal VM-to-VM address, e.g. http://boxel.internal:8081); embedded in the "+hub.InstallerPath+" script")
 	flag.Parse()
@@ -150,9 +152,10 @@ func run(o opts) error {
 	if err != nil {
 		return err
 	}
+	hubEnabled := hubToken != "" || o.hubAgentOwnerEmail != ""
 
 	if o.httpAddr == "" {
-		if hubToken != "" {
+		if hubEnabled {
 			return fmt.Errorf("the pull-mode hub requires the HTTP transport: pass --http")
 		}
 		log.SetOutput(os.Stderr) // keep stdout clean for the stdio transport
@@ -176,9 +179,10 @@ func run(o opts) error {
 		fmt.Fprintln(w, "ok")
 	})
 
-	if hubToken != "" {
+	if hubEnabled {
 		hb := hub.New(hub.Config{
 			AgentToken:    hubToken,
+			OwnerEmail:    o.hubAgentOwnerEmail,
 			AdvertiseURL:  o.hubAdvertiseURL,
 			InstallerAuth: authOK,
 			Version:       tunnel.Version,
@@ -335,7 +339,8 @@ func requireExeIdentity(ownerEmail string, next http.Handler) http.Handler {
 
 // resolveHubToken resolves the hub agent registration token from the flags or
 // $BOXEL_HUB_AGENT_TOKEN, and validates that hub-dependent flags are not set
-// without it. An empty result means the hub is disabled.
+// without a registration method. An empty result with no
+// --hub-agent-owner-email means the hub is disabled.
 func resolveHubToken(o opts) (string, error) {
 	token := o.hubAgentToken
 	if token == "" && o.hubAgentTokenFile != "" {
@@ -348,8 +353,8 @@ func resolveHubToken(o opts) (string, error) {
 	if token == "" {
 		token = os.Getenv("BOXEL_HUB_AGENT_TOKEN")
 	}
-	if token == "" && (o.hubAgentListen != "" || o.hubAdvertiseURL != "") {
-		return "", fmt.Errorf("--hub-agent-listen/--hub-advertise-url require a hub agent token: pass --hub-agent-token/--hub-agent-token-file or set BOXEL_HUB_AGENT_TOKEN")
+	if token == "" && o.hubAgentOwnerEmail == "" && (o.hubAgentListen != "" || o.hubAdvertiseURL != "") {
+		return "", fmt.Errorf("--hub-agent-listen/--hub-advertise-url require a registration method: pass --hub-agent-token/--hub-agent-token-file/$BOXEL_HUB_AGENT_TOKEN and/or --hub-agent-owner-email")
 	}
 	return token, nil
 }

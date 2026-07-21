@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -28,11 +30,23 @@ import (
 
 // Config configures the agent.
 type Config struct {
-	// HubURL is the base URL of the hub (http:// or https://), typically an
-	// internal VM-to-VM address; the registration endpoint is HubURL +
-	// /hub/connect.
+	// HubURL is the base URL of the hub (http:// or https://); the
+	// registration endpoint is HubURL + /hub/connect. On exe.dev this is the
+	// hub's peer integration URL (http://<integration>.int.exe.xyz). When
+	// empty, the agent autodiscovers it through the exe.dev reflection
+	// integration: it looks for an attached http-proxy integration named
+	// HubIntegration and dials that.
 	HubURL string
-	// Token is the hub's agent registration bearer token.
+	// ReflectionURL is the base URL of the exe.dev reflection integration
+	// used for autodiscovery when HubURL is empty.
+	// Default https://reflection.int.exe.xyz.
+	ReflectionURL string
+	// HubIntegration is the name of the hub's peer integration to discover
+	// via reflection. Default "boxel-hub".
+	HubIntegration string
+	// Token is the hub's agent registration bearer token. Optional: on
+	// exe.dev the peer integration authenticates the agent as the owner, and
+	// a hub configured with identity-based registration needs no token.
 	Token string
 	// Name is the handle to register under (normally the VM short hostname).
 	Name string
@@ -69,15 +83,19 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.DialTimeout <= 0 {
 		cfg.DialTimeout = 15 * time.Second
 	}
-	if cfg.Token == "" {
-		return errors.New("agent registration token is required")
+	if cfg.ReflectionURL == "" {
+		cfg.ReflectionURL = "https://reflection.int.exe.xyz"
+	}
+	if cfg.HubIntegration == "" {
+		cfg.HubIntegration = "boxel-hub"
 	}
 	if !hub.ValidName(cfg.Name) {
 		return fmt.Errorf("invalid agent name %q: want 1-63 chars of [a-z0-9-], not starting/ending with -", cfg.Name)
 	}
-	hubURL, err := url.Parse(cfg.HubURL)
-	if err != nil || (hubURL.Scheme != "http" && hubURL.Scheme != "https") || hubURL.Host == "" {
-		return fmt.Errorf("invalid hub URL %q: want http(s)://host[:port][/base]", cfg.HubURL)
+	if cfg.HubURL != "" {
+		if err := validateBaseURL(cfg.HubURL); err != nil {
+			return fmt.Errorf("invalid hub URL: %w", err)
+		}
 	}
 	target, err := url.Parse(cfg.Target)
 	if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
@@ -88,7 +106,7 @@ func Run(ctx context.Context, cfg Config) error {
 	backoff := cfg.MinBackoff
 	for {
 		start := time.Now()
-		err := runOnce(ctx, cfg, hubURL, handler)
+		err := connectCycle(ctx, cfg, handler)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -107,6 +125,89 @@ func Run(ctx context.Context, cfg Config) error {
 			backoff = cfg.MaxBackoff
 		}
 	}
+}
+
+func validateBaseURL(s string) error {
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("%q: want http(s)://host[:port][/base]", s)
+	}
+	return nil
+}
+
+// connectCycle resolves the hub URL (discovering it via reflection when not
+// configured) and runs one dial → register → serve cycle. Discovery happens
+// every cycle so a hub integration attached after the agent boots is picked
+// up on the next retry.
+func connectCycle(ctx context.Context, cfg Config, handler http.Handler) error {
+	hubURL := cfg.HubURL
+	if hubURL == "" {
+		discovered, err := discoverHubURL(ctx, cfg.ReflectionURL, cfg.HubIntegration)
+		if err != nil {
+			return fmt.Errorf("hub autodiscovery: %w (pass --hub / BOXEL_HUB_URL to skip discovery)", err)
+		}
+		cfg.Logf("boxel-agent: discovered hub %s via reflection integration %q", discovered, cfg.HubIntegration)
+		hubURL = discovered
+	}
+	u, err := url.Parse(hubURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("invalid hub URL %q", hubURL)
+	}
+	return runOnce(ctx, cfg, u, handler)
+}
+
+// reflectionIntegrations mirrors the reflection integration's /integrations
+// response.
+type reflectionIntegrations struct {
+	Integrations []struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+		Help string `json:"help"`
+	} `json:"integrations"`
+}
+
+var helpURLRe = regexp.MustCompile(`https?://[^\s"']+`)
+
+// discoverHubURL finds the hub's peer integration through the exe.dev
+// reflection integration and returns its base URL. It prefers the URL in the
+// integration's help text (exe.dev's canonical usage hint), falling back to
+// <name>.<int-domain> derived from the reflection host.
+func discoverHubURL(ctx context.Context, reflectionURL, integration string) (string, error) {
+	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(rctx, http.MethodGet, strings.TrimSuffix(reflectionURL, "/")+"/integrations", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("query reflection: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("reflection returned %s", resp.Status)
+	}
+	var list reflectionIntegrations
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&list); err != nil {
+		return "", fmt.Errorf("parse reflection response: %w", err)
+	}
+	for _, in := range list.Integrations {
+		if in.Type != "http-proxy" || in.Name != integration {
+			continue
+		}
+		if m := helpURLRe.FindString(in.Help); m != "" {
+			return strings.TrimSuffix(m, "/"), nil
+		}
+		// No URL in the help text: derive <name>.<domain> from the
+		// reflection host (reflection.int.exe.xyz → int.exe.xyz).
+		if ru, err := url.Parse(reflectionURL); err == nil {
+			if _, domain, ok := strings.Cut(ru.Host, "."); ok {
+				return "http://" + integration + "." + domain, nil
+			}
+		}
+		break
+	}
+	return "", fmt.Errorf("no http-proxy integration named %q attached to this VM (checked %s)", integration, reflectionURL)
 }
 
 // runOnce performs one dial → register → serve cycle, returning when the
@@ -149,10 +250,14 @@ func runOnce(ctx context.Context, cfg Config, u *url.URL, handler http.Handler) 
 		Header: http.Header{
 			"Upgrade":              {hub.UpgradeProtocol},
 			"Connection":           {"Upgrade"},
-			"Authorization":        {"Bearer " + cfg.Token},
 			hub.HeaderAgentName:    {cfg.Name},
 			hub.HeaderAgentVersion: {cfg.Version},
 		},
+	}
+	// No token is fine on exe.dev: the peer integration authenticates the
+	// request as the owner at the hub's edge.
+	if cfg.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.Token)
 	}
 	_ = conn.SetDeadline(time.Now().Add(cfg.DialTimeout))
 	if err := req.Write(conn); err != nil {

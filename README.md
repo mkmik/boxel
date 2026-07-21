@@ -74,9 +74,10 @@ The MCP endpoint is `POST /mcp` (requires `Authorization: Bearer <token>`); `GET
 | `--token` / `--token-file` | `$BOXEL_TOKEN` | Static bearer token for HTTP (testing; front with OAuth for production). |
 | `--owner-email` | *(none)* | Pin to one owner via the exe.dev edge: require the `X-ExeDev-Email` header to equal this address. Composes with `--token`. See [`docs/deployment.md`](docs/deployment.md). |
 | `--session-ttl` | `24h` | Idle-session GC TTL (`0` disables). |
-| `--hub-agent-token` / `--hub-agent-token-file` | `$BOXEL_HUB_AGENT_TOKEN` | Enable the **pull-mode hub** (see below): token agents present to register. |
-| `--hub-agent-listen` | *(disabled)* | Extra internal listener serving only the agent registration endpoint. |
-| `--hub-advertise-url` | *(fetch URL)* | Internal base URL agents dial; embedded in the `/install-agent` script. |
+| `--hub-agent-owner-email` | *(none)* | Enable the **pull-mode hub** (see below) with exe.dev identity registration: tokenless, names bound to the platform-verified caller VM. |
+| `--hub-agent-token` / `--hub-agent-token-file` | `$BOXEL_HUB_AGENT_TOKEN` | Enable the pull-mode hub with token registration (non-exe.dev deployments; composes with the above). |
+| `--hub-agent-listen` | *(disabled)* | Extra listener serving only the agent registration endpoint. |
+| `--hub-advertise-url` | *(reflection discovery / fetch URL)* | Base URL agents dial; embedded in the `/install-agent` script. |
 
 For HTTP, at least one of `--token` / `--owner-email` must be set — the server refuses to listen unauthenticated.
 
@@ -89,19 +90,28 @@ the hub proxies the whole `/vm/<name>/` base path to it — so the MCP endpoint
 for VM `foobar` becomes `https://<hub>/vm/foobar/mcp`, behind the hub's own
 auth (one connector origin, one credential, whole fleet).
 
-```sh
-# hub (routable VM): add to an existing HTTP deployment
-tunnel-mcp --http 127.0.0.1:8080 ... \
-  --hub-agent-token-file /etc/tunnel-mcp/agent-token \
-  --hub-agent-listen :8081 --hub-advertise-url http://<hub-internal-dns>:8081
+On exe.dev this is fully tokenless: agents reach the hub through a **peer
+integration** (`boxel-hub.int.exe.xyz`), the hub authorizes registrations by
+the edge-injected owner identity, agent names are bound to the
+platform-verified `X-Exedev-Source-Vm` header, and agents autodiscover the
+hub via the `reflection` integration.
 
-# each non-routable VM:
-curl -fsSL https://<hub>/install-agent | sudo bash
+```sh
+# hub VM: add to an existing HTTP deployment
+tunnel-mcp --http 127.0.0.1:8080 ... --hub-agent-owner-email you@example.com
+
+# once: create the fleet's peer integration, attached by tag
+ssh exe.dev integrations add http-proxy --name boxel-hub \
+  --target https://<hub-vm>.exe.xyz/ --peer --attach tag:boxel
+
+# each fleet VM: tag it, then install the agent
+ssh exe.dev tag <vm> boxel
+curl -fsSL http://boxel-hub.int.exe.xyz/install-agent | sudo bash
 ```
 
-The installer builds `cmd/boxel-agent` with `go install`, registers a systemd
-unit, and embeds the hub's registration URL (and, if the fetch was
-authenticated, the agent token). See [`docs/pull-mode.md`](docs/pull-mode.md).
+The installer builds `cmd/boxel-agent` with `go install` and registers a
+systemd unit. Non-exe.dev deployments use `--hub-agent-token` instead. See
+[`docs/pull-mode.md`](docs/pull-mode.md).
 
 ## Permissions
 

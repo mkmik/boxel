@@ -45,13 +45,33 @@ const (
 	HeaderAgentName = "X-Boxel-Agent-Name"
 	// HeaderAgentVersion carries the agent's version (informational).
 	HeaderAgentVersion = "X-Boxel-Agent-Version"
+	// HeaderExeEmail is injected by the exe.dev edge on authenticated
+	// requests (overwriting any client-supplied copy).
+	HeaderExeEmail = "X-ExeDev-Email"
+	// HeaderSourceVM is set (not appended) by the exe.dev platform on
+	// requests that flow through a peer integration: the name of the calling
+	// VM, unforgeable by that VM.
+	HeaderSourceVM = "X-Exedev-Source-Vm"
 )
 
-// Config configures a Hub.
+// Config configures a Hub. At least one of AgentToken / OwnerEmail must be
+// set — a hub never accepts unauthenticated registrations. When both are set
+// they are alternatives: a registration is accepted if either authenticates
+// (mixed fleets: exe.dev VMs register via identity, others via token).
 type Config struct {
-	// AgentToken is the bearer token agents must present to register.
-	// Required: a hub never accepts unauthenticated registrations.
+	// AgentToken is a bearer token agents may present to register.
 	AgentToken string
+	// OwnerEmail enables identity-based registration for exe.dev
+	// deployments: a registration is accepted when the exe.dev edge identity
+	// header (X-ExeDev-Email) equals this address. Agent VMs have no direct
+	// network path to the hub on exe.dev — they reach it through a peer
+	// integration, whose injected API key authenticates the request at the
+	// hub's edge as the owner. When the platform's X-Exedev-Source-Vm header
+	// is present it overrides the self-asserted agent name, binding the
+	// handle to the verified calling VM. Like tunnel-mcp's --owner-email,
+	// this is trustworthy only when the hub is reachable exclusively through
+	// the exe.dev edge (bind the listener to localhost).
+	OwnerEmail string
 	// AdvertiseURL is the base URL agents should dial to reach this hub
 	// (typically an internal VM-to-VM address). It is embedded in the
 	// installer script; when empty the installer falls back to the URL the
@@ -87,6 +107,7 @@ type agentConn struct {
 	name        string
 	remoteAddr  string
 	version     string
+	auth        string // how the registration authenticated, for logs
 	connectedAt time.Time
 	cc          *http2.ClientConn
 	conn        net.Conn
@@ -211,17 +232,36 @@ func (h *Hub) AttachRoutes(mux *http.ServeMux, guard func(http.Handler) http.Han
 // additional (internal) listener.
 func (h *Hub) ConnectHandler() http.Handler { return http.HandlerFunc(h.handleConnect) }
 
+// authenticateAgent checks a registration request against the configured
+// methods, returning the name of the method that authenticated it ("" = none).
+func (h *Hub) authenticateAgent(r *http.Request) string {
+	if h.cfg.AgentToken != "" {
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if strings.HasPrefix(auth, prefix) &&
+			subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, prefix)), []byte(h.cfg.AgentToken)) == 1 {
+			return "token"
+		}
+	}
+	if h.cfg.OwnerEmail != "" {
+		want := strings.ToLower(strings.TrimSpace(h.cfg.OwnerEmail))
+		got := strings.ToLower(strings.TrimSpace(r.Header.Get(HeaderExeEmail)))
+		if got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1 {
+			return "exe-identity"
+		}
+	}
+	return ""
+}
+
 // handleConnect authenticates an agent, hijacks the connection, completes the
 // 101 upgrade, and registers the reverse HTTP/2 channel.
 func (h *Hub) handleConnect(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.AgentToken == "" {
+	if h.cfg.AgentToken == "" && h.cfg.OwnerEmail == "" {
 		http.Error(w, "agent registration disabled", http.StatusServiceUnavailable)
 		return
 	}
-	auth := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if !strings.HasPrefix(auth, prefix) ||
-		subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, prefix)), []byte(h.cfg.AgentToken)) != 1 {
+	method := h.authenticateAgent(r)
+	if method == "" {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="boxel-hub"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -231,7 +271,15 @@ func (h *Hub) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("expected Upgrade: %s", UpgradeProtocol), http.StatusBadRequest)
 		return
 	}
-	name := strings.ToLower(strings.TrimSpace(r.Header.Get(HeaderAgentName)))
+	// The platform-verified caller VM name (present on requests through an
+	// exe.dev peer integration) always beats the self-asserted one: a
+	// workload can then only ever register as the VM it runs on.
+	name := strings.ToLower(strings.TrimSpace(r.Header.Get(HeaderSourceVM)))
+	nameSource := "verified"
+	if name == "" {
+		name = strings.ToLower(strings.TrimSpace(r.Header.Get(HeaderAgentName)))
+		nameSource = "self-reported"
+	}
 	if !ValidName(name) {
 		http.Error(w, fmt.Sprintf("invalid agent name %q: want 1-63 chars of [a-z0-9-], not starting/ending with -", name), http.StatusBadRequest)
 		return
@@ -272,6 +320,7 @@ func (h *Hub) handleConnect(w http.ResponseWriter, r *http.Request) {
 		name:        name,
 		remoteAddr:  conn.RemoteAddr().String(),
 		version:     r.Header.Get(HeaderAgentVersion),
+		auth:        method + "," + nameSource + "-name",
 		connectedAt: time.Now(),
 		cc:          cc,
 		conn:        conn,
@@ -290,10 +339,10 @@ func (h *Hub) register(a *agentConn) {
 	h.agents[a.name] = a
 	h.mu.Unlock()
 	if old != nil {
-		h.cfg.Logf("hub: agent %q reconnected from %s (replacing channel from %s)", a.name, a.remoteAddr, old.remoteAddr)
+		h.cfg.Logf("hub: agent %q reconnected from %s (%s; replacing channel from %s)", a.name, a.remoteAddr, a.auth, old.remoteAddr)
 		old.close()
 	} else {
-		h.cfg.Logf("hub: agent %q connected from %s", a.name, a.remoteAddr)
+		h.cfg.Logf("hub: agent %q connected from %s (%s)", a.name, a.remoteAddr, a.auth)
 	}
 }
 

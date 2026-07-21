@@ -31,6 +31,8 @@ const Version = "0.1.0"
 func main() {
 	var (
 		hubURL          string
+		hubIntegration  string
+		reflectionURL   string
 		token           string
 		tokenFile       string
 		name            string
@@ -38,8 +40,10 @@ func main() {
 		targetToken     string
 		targetTokenFile string
 	)
-	flag.StringVar(&hubURL, "hub", os.Getenv("BOXEL_HUB_URL"), "base URL of the boxel hub to register with, e.g. http://boxel.internal:8081 (or BOXEL_HUB_URL)")
-	flag.StringVar(&token, "token", "", "agent registration bearer token (or BOXEL_AGENT_TOKEN)")
+	flag.StringVar(&hubURL, "hub", os.Getenv("BOXEL_HUB_URL"), "base URL of the boxel hub to register with, e.g. http://boxel-hub.int.exe.xyz (or BOXEL_HUB_URL); empty = autodiscover the hub's peer integration via exe.dev reflection")
+	flag.StringVar(&hubIntegration, "hub-integration", os.Getenv("BOXEL_HUB_INTEGRATION"), "name of the hub's peer integration to autodiscover via reflection (or BOXEL_HUB_INTEGRATION; default boxel-hub)")
+	flag.StringVar(&reflectionURL, "reflection-url", os.Getenv("BOXEL_REFLECTION_URL"), "base URL of the exe.dev reflection integration used for autodiscovery (or BOXEL_REFLECTION_URL; default https://reflection.int.exe.xyz)")
+	flag.StringVar(&token, "token", "", "agent registration bearer token (or BOXEL_AGENT_TOKEN); not needed when the hub accepts exe.dev identity registration")
 	flag.StringVar(&tokenFile, "token-file", os.Getenv("BOXEL_AGENT_TOKEN_FILE"), "read the registration token from this file")
 	flag.StringVar(&name, "name", "", "handle to register under; becomes the /vm/<name>/ path on the hub (default: BOXEL_AGENT_NAME or this VM's short hostname)")
 	flag.StringVar(&target, "target", "", "local base URL proxied requests are forwarded to (default: BOXEL_AGENT_TARGET or http://127.0.0.1:8080)")
@@ -47,24 +51,18 @@ func main() {
 	flag.StringVar(&targetTokenFile, "target-token-file", os.Getenv("BOXEL_AGENT_TARGET_TOKEN_FILE"), "read the target bearer token from this file")
 	flag.Parse()
 
-	if err := run(hubURL, token, tokenFile, name, target, targetToken, targetTokenFile); err != nil && !errors.Is(err, context.Canceled) {
+	if err := run(hubURL, hubIntegration, reflectionURL, token, tokenFile, name, target, targetToken, targetTokenFile); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatal(err)
 	}
 }
 
-func run(hubURL, token, tokenFile, name, target, targetToken, targetTokenFile string) error {
+func run(hubURL, hubIntegration, reflectionURL, token, tokenFile, name, target, targetToken, targetTokenFile string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if hubURL == "" {
-		return errors.New("hub URL is required: pass --hub or set BOXEL_HUB_URL")
-	}
 	token, err := resolve(token, tokenFile, "BOXEL_AGENT_TOKEN")
 	if err != nil {
 		return err
-	}
-	if token == "" {
-		return errors.New("registration token is required: pass --token/--token-file or set BOXEL_AGENT_TOKEN")
 	}
 	if name == "" {
 		name = os.Getenv("BOXEL_AGENT_NAME")
@@ -86,12 +84,14 @@ func run(hubURL, token, tokenFile, name, target, targetToken, targetTokenFile st
 	}
 
 	return hubagent.Run(ctx, hubagent.Config{
-		HubURL:      hubURL,
-		Token:       token,
-		Name:        name,
-		Target:      target,
-		TargetToken: targetToken,
-		Version:     Version,
+		HubURL:         hubURL,
+		HubIntegration: hubIntegration,
+		ReflectionURL:  reflectionURL,
+		Token:          token,
+		Name:           name,
+		Target:         target,
+		TargetToken:    targetToken,
+		Version:        Version,
 	})
 }
 

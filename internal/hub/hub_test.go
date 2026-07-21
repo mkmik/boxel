@@ -285,3 +285,123 @@ func TestValidName(t *testing.T) {
 		}
 	}
 }
+
+// exeEdgeSim simulates the exe.dev edge + peer integration in front of the
+// hub: it stamps the authenticated owner identity on every request
+// (overwriting client-supplied copies) and the platform-verified source VM
+// name on registration upgrades.
+func exeEdgeSim(email, sourceVM string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set(hub.HeaderExeEmail, email)
+		if strings.EqualFold(r.Header.Get("Upgrade"), hub.UpgradeProtocol) {
+			r.Header.Set(hub.HeaderSourceVM, sourceVM)
+		} else {
+			r.Header.Del(hub.HeaderSourceVM)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// TestIdentityRegistration: tokenless exe.dev-style registration — the edge
+// identity authenticates the agent and the platform-verified source VM name
+// overrides the self-asserted one.
+func TestIdentityRegistration(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "hello from real VM")
+	}))
+	defer target.Close()
+
+	h := hub.New(hub.Config{OwnerEmail: "owner@example.com", Logf: t.Logf})
+	mux := http.NewServeMux()
+	h.AttachRoutes(mux, nil)
+	ts := httptest.NewServer(exeEdgeSim("Owner@Example.com", "realname", mux))
+	defer ts.Close()
+
+	// No token, and a spoofed self-asserted name that must NOT win.
+	startAgent(t, hubagent.Config{HubURL: ts.URL, Name: "spoofed", Target: target.URL})
+	waitRegistered(t, h, "realname", time.Time{})
+
+	for _, a := range h.Agents() {
+		if a.Name == "spoofed" {
+			t.Fatal("self-asserted name registered despite verified source VM header")
+		}
+	}
+	code, body := get(t, ts.URL+"/vm/realname/")
+	if code != http.StatusOK || body != "hello from real VM" {
+		t.Errorf("proxy via identity-registered agent: code %d, body %q", code, body)
+	}
+}
+
+// TestIdentityRegistrationRejectsWrongOwner: a request authenticated as a
+// different user (e.g. a VM shared with someone else) must not register.
+func TestIdentityRegistrationRejectsWrongOwner(t *testing.T) {
+	h := hub.New(hub.Config{OwnerEmail: "owner@example.com", Logf: t.Logf})
+	mux := http.NewServeMux()
+	h.AttachRoutes(mux, nil)
+	ts := httptest.NewServer(exeEdgeSim("intruder@example.com", "evil", mux))
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+hub.ConnectPath, nil)
+	req.Header.Set("Upgrade", hub.UpgradeProtocol)
+	req.Header.Set("Connection", "Upgrade")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("wrong owner: code %d, want 401", resp.StatusCode)
+	}
+	if len(h.Agents()) != 0 {
+		t.Errorf("registry not empty: %+v", h.Agents())
+	}
+}
+
+// TestReflectionDiscovery: with no hub URL configured, the agent finds the
+// hub through a (simulated) exe.dev reflection integration and connects.
+func TestReflectionDiscovery(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "discovered")
+	}))
+	defer target.Close()
+
+	h, ts := startHub(t, hub.Config{AgentToken: "tok"})
+	reflection := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/integrations" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprintf(w, `{"integrations":[
+			{"name":"llm","type":"llm","help":"curl https://llm.int.exe.xyz/v1/models"},
+			{"name":"boxel-hub","type":"http-proxy","help":"curl %s/"}
+		]}`, ts.URL)
+	}))
+	defer reflection.Close()
+
+	startAgent(t, hubagent.Config{
+		ReflectionURL: reflection.URL, // HubURL empty → discovery
+		Token:         "tok",
+		Name:          "disco",
+		Target:        target.URL,
+	})
+	waitRegistered(t, h, "disco", time.Time{})
+	if code, body := get(t, ts.URL+"/vm/disco/"); code != http.StatusOK || body != "discovered" {
+		t.Errorf("proxy via discovered hub: code %d, body %q", code, body)
+	}
+}
+
+// TestInstallerIdentityMode: with identity registration the script must work
+// without any token and without a hub URL (autodiscovery).
+func TestInstallerIdentityMode(t *testing.T) {
+	_, ts := startHub(t, hub.Config{OwnerEmail: "owner@example.com"})
+	code, body := get(t, ts.URL+hub.InstallerPath)
+	if code != http.StatusOK {
+		t.Fatalf("installer code %d", code)
+	}
+	if strings.Contains(body, "error: no registration token") {
+		t.Error("identity-mode installer still demands a token")
+	}
+	if !strings.Contains(body, "autodiscovered via reflection") {
+		t.Error("identity-mode installer does not mention autodiscovery")
+	}
+}

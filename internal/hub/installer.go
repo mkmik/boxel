@@ -9,9 +9,10 @@ import (
 const modulePath = "github.com/mkmik/boxel"
 
 type installerData struct {
-	HubURL        string // registration URL the agent dials (internal address)
+	HubURL        string // registration URL the agent dials; empty = agent autodiscovers via reflection
 	PublicURL     string // URL the installer was fetched from (edge address)
 	Token         string // agent token, empty unless the request was authenticated
+	TokenRequired bool   // token is the hub's only registration method
 	Module        string
 	ModuleVersion string
 	Version       string
@@ -25,11 +26,16 @@ func (h *Hub) handleInstaller(w http.ResponseWriter, r *http.Request) {
 	data := installerData{
 		HubURL:        h.cfg.AdvertiseURL,
 		PublicURL:     requestBaseURL(r),
+		TokenRequired: h.cfg.OwnerEmail == "",
 		Module:        modulePath,
 		ModuleVersion: "latest",
 		Version:       h.cfg.Version,
 	}
-	if data.HubURL == "" {
+	// With identity-based registration (exe.dev), an unset advertise URL is
+	// fine: the agent discovers the hub's peer integration via reflection.
+	// With token-only registration there is no discovery, so fall back to the
+	// URL this script was fetched from.
+	if data.HubURL == "" && data.TokenRequired {
 		data.HubURL = data.PublicURL
 	}
 	if h.cfg.InstallerAuth != nil && h.cfg.InstallerAuth(r) {
@@ -67,25 +73,30 @@ var installerTmpl = template.Must(template.New("installer").Parse(`#!/usr/bin/en
 #   curl -fsSL {{.PublicURL}}{{"/install-agent"}} | sudo bash
 #
 # Overridable environment:
-#   BOXEL_HUB_URL       hub URL the agent dials      (default: {{.HubURL}})
-#   BOXEL_AGENT_TOKEN   registration token           {{if .Token}}(embedded in this script){{else}}(REQUIRED: this copy was served unauthenticated){{end}}
-#   BOXEL_AGENT_NAME    handle to register under     (default: short hostname)
-#   BOXEL_AGENT_TARGET  local URL to forward to      (default: http://127.0.0.1:8080)
+#   BOXEL_HUB_URL          hub URL the agent dials      {{if .HubURL}}(default: {{.HubURL}}){{else}}(default: autodiscovered via reflection.int.exe.xyz){{end}}
+#   BOXEL_HUB_INTEGRATION  peer integration name to discover (default: boxel-hub)
+#   BOXEL_AGENT_TOKEN      registration token           {{if .Token}}(embedded in this script){{else if .TokenRequired}}(REQUIRED: this copy was served unauthenticated){{else}}(not needed: the hub accepts exe.dev identity){{end}}
+#   BOXEL_AGENT_NAME       handle to register under     (default: short hostname; overridden by the platform-verified VM name on exe.dev)
+#   BOXEL_AGENT_TARGET     local URL to forward to      (default: http://127.0.0.1:8080)
 set -euo pipefail
 
 HUB_URL="${BOXEL_HUB_URL:-{{.HubURL}}}"
+HUB_INTEGRATION="${BOXEL_HUB_INTEGRATION:-}"
 AGENT_TOKEN="${BOXEL_AGENT_TOKEN:-{{.Token}}}"
 AGENT_NAME="${BOXEL_AGENT_NAME:-$(hostname -s | tr '[:upper:]' '[:lower:]')}"
 TARGET_URL="${BOXEL_AGENT_TARGET:-http://127.0.0.1:8080}"
 MODULE="{{.Module}}/cmd/boxel-agent@{{.ModuleVersion}}"
 
+{{if .TokenRequired -}}
 if [ -z "$AGENT_TOKEN" ]; then
   echo "error: no registration token." >&2
-  echo "The hub embeds its agent token only when the installer request is authenticated" >&2
-  echo "(e.g. fetched with the hub's bearer token). Otherwise pass it explicitly:" >&2
+  echo "This hub only accepts token-based registration, and it embeds the token only" >&2
+  echo "when the installer request is authenticated (e.g. fetched with the hub's" >&2
+  echo "bearer token). Otherwise pass it explicitly:" >&2
   echo "  curl -fsSL {{.PublicURL}}{{"/install-agent"}} | sudo BOXEL_AGENT_TOKEN=<token> bash" >&2
   exit 1
 fi
+{{end -}}
 if [ "$(id -u)" -ne 0 ]; then
   echo "error: run as root (installs to /usr/local/bin and registers a systemd unit):" >&2
   echo "  curl -fsSL {{.PublicURL}}{{"/install-agent"}} | sudo bash" >&2
@@ -102,8 +113,15 @@ id boxel-agent >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /
 install -d -m 750 -o root -g boxel-agent /etc/boxel-agent
 ENV_FILE=/etc/boxel-agent/env
 {
-  printf 'BOXEL_HUB_URL=%s\n' "$HUB_URL"
-  printf 'BOXEL_AGENT_TOKEN=%s\n' "$AGENT_TOKEN"
+  if [ -n "$HUB_URL" ]; then
+    printf 'BOXEL_HUB_URL=%s\n' "$HUB_URL"
+  fi
+  if [ -n "$HUB_INTEGRATION" ]; then
+    printf 'BOXEL_HUB_INTEGRATION=%s\n' "$HUB_INTEGRATION"
+  fi
+  if [ -n "$AGENT_TOKEN" ]; then
+    printf 'BOXEL_AGENT_TOKEN=%s\n' "$AGENT_TOKEN"
+  fi
   printf 'BOXEL_AGENT_NAME=%s\n' "$AGENT_NAME"
   printf 'BOXEL_AGENT_TARGET=%s\n' "$TARGET_URL"
 } > "$ENV_FILE"
@@ -150,7 +168,7 @@ systemctl enable --now boxel-agent
 systemctl --no-pager --lines=3 status boxel-agent || true
 
 echo
-echo "boxel-agent installed; registering with $HUB_URL as \"$AGENT_NAME\"."
+echo "boxel-agent installed; registering with ${HUB_URL:-the autodiscovered hub} as \"$AGENT_NAME\"."
 echo "Once connected, this VM is reachable through the hub at:"
 echo "  {{.PublicURL}}/vm/$AGENT_NAME/"
 echo "MCP endpoint:"
