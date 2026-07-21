@@ -12,6 +12,7 @@ Claude connector ── https://boxel.exe.xyz/vm/foobar/mcp
                  ┌────────▼─────────┐    exe.dev edge (TLS + SSO) → hub VM
                  │  tunnel-mcp hub  │
                  │  /mcp      local sandbox (as before)
+                 │  /                ── dashboard (agents, status, traffic)
                  │  /vm/{name}/…    ── proxied to agent "name"
                  │  /agents         ── registry (JSON)
                  │  /install-agent  ── curl|bash installer
@@ -30,6 +31,12 @@ Because a single hub hostname fronts every VM, one Claude MCP connector origin
 — and one auth cookie / bearer token, since both are bound to the hostname —
 covers the whole fleet. The **entire base path** `/vm/<name>/` is proxied, not
 just `/mcp`, leaving room to expose more per-VM APIs later.
+
+The hub root (`/`) serves a small auto-refreshing HTML dashboard listing every
+agent that has registered since the hub started — whether it is currently
+connected, since when, and how many messages the mux proxied to it. The same
+data is available as JSON at `/agents`. Both endpoints sit behind the hub's
+client auth.
 
 ## How the reverse channel works
 

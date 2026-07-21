@@ -132,6 +132,67 @@ func TestPullModeEndToEnd(t *testing.T) {
 	}
 }
 
+// TestDashboardAndStatus: the root dashboard and /agents report every agent
+// that ever registered, its connected/disconnected status, and the number of
+// messages the mux proxied to it.
+func TestDashboardAndStatus(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	}))
+	defer target.Close()
+
+	// A fast ping interval so the hub notices the agent going away quickly.
+	h, ts := startHub(t, hub.Config{AgentToken: "tok", PingInterval: 20 * time.Millisecond})
+	cancel := startAgent(t, hubagent.Config{HubURL: ts.URL, Token: "tok", Name: "dash", Target: target.URL})
+	waitRegistered(t, h, "dash", time.Time{})
+
+	// Empty dashboard for unknown agents is out of scope here; proxy three
+	// messages through and check the counters.
+	for i := 0; i < 3; i++ {
+		if code, _ := get(t, ts.URL+"/vm/dash/ping"); code != http.StatusOK {
+			t.Fatalf("proxy request %d failed with code %d", i, code)
+		}
+	}
+	agents := h.Agents()
+	if len(agents) != 1 {
+		t.Fatalf("registry: %+v", agents)
+	}
+	if a := agents[0]; !a.Connected || a.Messages != 3 {
+		t.Errorf("agent = %+v, want connected with 3 messages", a)
+	}
+
+	code, body := get(t, ts.URL+"/")
+	if code != http.StatusOK {
+		t.Fatalf("dashboard code %d", code)
+	}
+	for _, want := range []string{"dash", "connected", ">3<"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard missing %q; body:\n%s", want, body)
+		}
+	}
+
+	// Kill the agent: it must stay in the registry, flipped to disconnected,
+	// with its message count intact.
+	cancel()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		agents = h.Agents()
+		if len(agents) == 1 && !agents[0].Connected {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("agent never marked disconnected; registry: %+v", agents)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if a := agents[0]; a.Messages != 3 || a.DisconnectedAt.IsZero() {
+		t.Errorf("disconnected agent = %+v, want 3 messages and a disconnect time", a)
+	}
+	if _, body := get(t, ts.URL+"/"); !strings.Contains(body, "disconnected") {
+		t.Errorf("dashboard does not show the agent as disconnected; body:\n%s", body)
+	}
+}
+
 // TestStreamingFlush verifies that response bytes flow through both proxy hops
 // incrementally — the property MCP streamable HTTP (SSE) depends on.
 func TestStreamingFlush(t *testing.T) {
