@@ -30,6 +30,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/mkmik/boxel/internal/audit"
+	"github.com/mkmik/boxel/internal/hub"
 	"github.com/mkmik/boxel/internal/metrics"
 	"github.com/mkmik/boxel/internal/policy"
 	"github.com/mkmik/boxel/internal/session"
@@ -48,6 +49,12 @@ type opts struct {
 	tokenFile   string
 	ownerEmail  string
 	sessionTTL  time.Duration
+
+	hubAgentToken      string
+	hubAgentTokenFile  string
+	hubAgentOwnerEmail string
+	hubAgentListen     string
+	hubAdvertiseURL    string
 }
 
 func main() {
@@ -62,6 +69,11 @@ func main() {
 	flag.StringVar(&o.tokenFile, "token-file", "", "read the bearer token from this file")
 	flag.StringVar(&o.ownerEmail, "owner-email", "", "pin to a single owner via the exe.dev edge: require the X-ExeDev-Email header (injected by the exe.dev proxy) to equal this address. Bind --http to localhost so the edge is the only path in. Composes with --token.")
 	flag.DurationVar(&o.sessionTTL, "session-ttl", 24*time.Hour, "idle session garbage-collection TTL (0 disables GC)")
+	flag.StringVar(&o.hubAgentToken, "hub-agent-token", "", "enable the pull-mode hub: bearer token agents may present to register (or set BOXEL_HUB_AGENT_TOKEN); requires --http")
+	flag.StringVar(&o.hubAgentTokenFile, "hub-agent-token-file", "", "read the hub agent registration token from this file")
+	flag.StringVar(&o.hubAgentOwnerEmail, "hub-agent-owner-email", "", "enable the pull-mode hub with exe.dev identity registration: accept a registration when the X-ExeDev-Email header (injected by the exe.dev edge for peer-integration traffic) equals this address; the platform-verified X-Exedev-Source-Vm header then names the agent. Composes with --hub-agent-token as an alternative method. Bind --http to localhost so the edge is the only path in.")
+	flag.StringVar(&o.hubAgentListen, "hub-agent-listen", "", "additionally serve the agent registration endpoint ("+hub.ConnectPath+") on this address, reachable by agent VMs over the internal network (e.g. :8081)")
+	flag.StringVar(&o.hubAdvertiseURL, "hub-advertise-url", "", "base URL agents should dial to reach this hub (internal VM-to-VM address, e.g. http://boxel.internal:8081); embedded in the "+hub.InstallerPath+" script")
 	flag.Parse()
 
 	if err := run(o); err != nil {
@@ -136,7 +148,16 @@ func run(o opts) error {
 		}()
 	}
 
+	hubToken, err := resolveHubToken(o)
+	if err != nil {
+		return err
+	}
+	hubEnabled := hubToken != "" || o.hubAgentOwnerEmail != ""
+
 	if o.httpAddr == "" {
+		if hubEnabled {
+			return fmt.Errorf("the pull-mode hub requires the HTTP transport: pass --http")
+		}
 		log.SetOutput(os.Stderr) // keep stdout clean for the stdio transport
 		log.Printf("tunnel-mcp %s: stdio transport, workspace %s, mode %s", tunnel.Version, workspace, o.mode)
 		return srv.Run(ctx, &mcp.StdioTransport{})
@@ -147,16 +168,41 @@ func run(o opts) error {
 		return err
 	}
 	handler := newStreamableHandler(srv)
-	guarded, authDesc, err := authMiddleware(bearer, o.ownerEmail, handler)
+	guard, authOK, authDesc, err := authLayers(bearer, o.ownerEmail)
 	if err != nil {
 		return err
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", guarded)
+	mux.Handle("/mcp", guard(handler))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
+
+	if hubEnabled {
+		hb := hub.New(hub.Config{
+			AgentToken:    hubToken,
+			OwnerEmail:    o.hubAgentOwnerEmail,
+			AdvertiseURL:  o.hubAdvertiseURL,
+			InstallerAuth: authOK,
+			Version:       tunnel.Version,
+		})
+		hb.AttachRoutes(mux, guard)
+		log.Printf("hub: pull-mode multiplexer enabled: /vm/{name}/ proxy, %s registration, %s installer", hub.ConnectPath, hub.InstallerPath)
+		if o.hubAgentListen != "" {
+			amux := http.NewServeMux()
+			amux.Handle("GET "+hub.ConnectPath, hb.ConnectHandler())
+			amux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintln(w, "ok")
+			})
+			go func() {
+				log.Printf("hub: agent registration listener on %s%s", o.hubAgentListen, hub.ConnectPath)
+				if err := http.ListenAndServe(o.hubAgentListen, amux); err != nil && err != http.ErrServerClosed {
+					log.Printf("hub agent listener: %v", err)
+				}
+			}()
+		}
+	}
 
 	hs := &http.Server{Addr: o.httpAddr, Handler: mux}
 	go func() {
@@ -207,37 +253,64 @@ func resolveToken(token, tokenFile string) (string, error) {
 // (bind --http to localhost). See docs/deployment.md.
 const exeEmailHeader = "X-ExeDev-Email"
 
-// authMiddleware wraps next with the configured HTTP auth layers. bearer (if
-// set) requires a matching Authorization: Bearer token; ownerEmail (if set)
-// requires the exe.dev edge identity header to equal that address. Both may be
-// enabled, in which case a request must satisfy both. At least one must be
-// configured — the invoke tool is authenticated RCE, so listening
+// authLayers builds the configured HTTP auth: a middleware that wraps a
+// handler with the enforcing layers, and a boolean predicate over a request
+// (used to decide whether the hub installer may embed the agent token). bearer
+// (if set) requires a matching Authorization: Bearer token; ownerEmail (if
+// set) requires the exe.dev edge identity header to equal that address. Both
+// may be enabled, in which case a request must satisfy both. At least one must
+// be configured — the invoke tool is authenticated RCE, so listening
 // unauthenticated is refused. Returns a short description for logging.
-func authMiddleware(bearer, ownerEmail string, next http.Handler) (http.Handler, string, error) {
-	// h is wrapped inner-to-outer; layers is built outermost-first (the order
-	// requests are checked) for a readable log line.
+func authLayers(bearer, ownerEmail string) (wrap func(http.Handler) http.Handler, ok func(*http.Request) bool, desc string, err error) {
 	var layers []string
-	h := next
+	if bearer != "" {
+		layers = append(layers, "bearer")
+	}
 	if ownerEmail != "" {
-		h = requireExeIdentity(ownerEmail, h)
 		layers = append(layers, "exe-identity("+ownerEmail+")")
 	}
-	if bearer != "" {
-		h = requireBearer(bearer, h)
-		layers = append([]string{"bearer"}, layers...)
-	}
 	if len(layers) == 0 {
-		return nil, "", fmt.Errorf("HTTP transport requires authentication: pass --token/--token-file/$BOXEL_TOKEN and/or --owner-email (the invoke tool is authenticated RCE; refusing to listen unauthenticated)")
+		return nil, nil, "", fmt.Errorf("HTTP transport requires authentication: pass --token/--token-file/$BOXEL_TOKEN and/or --owner-email (the invoke tool is authenticated RCE; refusing to listen unauthenticated)")
 	}
-	return h, strings.Join(layers, "+"), nil
+	wrap = func(next http.Handler) http.Handler {
+		// Wrapped inner-to-outer so the bearer is checked first.
+		h := next
+		if ownerEmail != "" {
+			h = requireExeIdentity(ownerEmail, h)
+		}
+		if bearer != "" {
+			h = requireBearer(bearer, h)
+		}
+		return h
+	}
+	ok = func(r *http.Request) bool {
+		if bearer != "" && !bearerOK(r, bearer) {
+			return false
+		}
+		if ownerEmail != "" && !exeIdentityOK(r, ownerEmail) {
+			return false
+		}
+		return true
+	}
+	return wrap, ok, strings.Join(layers, "+"), nil
+}
+
+func bearerOK(r *http.Request, token string) bool {
+	auth := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	return strings.HasPrefix(auth, prefix) &&
+		subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, prefix)), []byte(token)) == 1
+}
+
+func exeIdentityOK(r *http.Request, ownerEmail string) bool {
+	want := strings.ToLower(strings.TrimSpace(ownerEmail))
+	got := strings.ToLower(strings.TrimSpace(r.Header.Get(exeEmailHeader)))
+	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func requireBearer(token string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		const prefix = "Bearer "
-		if !strings.HasPrefix(auth, prefix) ||
-			subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, prefix)), []byte(token)) != 1 {
+		if !bearerOK(r, token) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="tunnel-mcp"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -251,17 +324,37 @@ func requireBearer(token string, next http.Handler) http.Handler {
 // authenticating edge (or the VM is public without identity injection) and is
 // rejected; a present-but-different email is a forbidden non-owner.
 func requireExeIdentity(ownerEmail string, next http.Handler) http.Handler {
-	want := strings.ToLower(strings.TrimSpace(ownerEmail))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := strings.ToLower(strings.TrimSpace(r.Header.Get(exeEmailHeader)))
-		if got == "" {
+		if strings.TrimSpace(r.Header.Get(exeEmailHeader)) == "" {
 			http.Error(w, "unauthorized: missing exe.dev identity", http.StatusUnauthorized)
 			return
 		}
-		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+		if !exeIdentityOK(r, ownerEmail) {
 			http.Error(w, "forbidden: not the authorized owner", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// resolveHubToken resolves the hub agent registration token from the flags or
+// $BOXEL_HUB_AGENT_TOKEN, and validates that hub-dependent flags are not set
+// without a registration method. An empty result with no
+// --hub-agent-owner-email means the hub is disabled.
+func resolveHubToken(o opts) (string, error) {
+	token := o.hubAgentToken
+	if token == "" && o.hubAgentTokenFile != "" {
+		b, err := os.ReadFile(o.hubAgentTokenFile)
+		if err != nil {
+			return "", fmt.Errorf("read hub agent token file: %w", err)
+		}
+		token = strings.TrimSpace(string(b))
+	}
+	if token == "" {
+		token = os.Getenv("BOXEL_HUB_AGENT_TOKEN")
+	}
+	if token == "" && o.hubAgentOwnerEmail == "" && (o.hubAgentListen != "" || o.hubAdvertiseURL != "") {
+		return "", fmt.Errorf("--hub-agent-listen/--hub-advertise-url require a registration method: pass --hub-agent-token/--hub-agent-token-file/$BOXEL_HUB_AGENT_TOKEN and/or --hub-agent-owner-email")
+	}
+	return token, nil
 }

@@ -74,8 +74,143 @@ The MCP endpoint is `POST /mcp` (requires `Authorization: Bearer <token>`); `GET
 | `--token` / `--token-file` | `$BOXEL_TOKEN` | Static bearer token for HTTP (testing; front with OAuth for production). |
 | `--owner-email` | *(none)* | Pin to one owner via the exe.dev edge: require the `X-ExeDev-Email` header to equal this address. Composes with `--token`. See [`docs/deployment.md`](docs/deployment.md). |
 | `--session-ttl` | `24h` | Idle-session GC TTL (`0` disables). |
+| `--hub-agent-owner-email` | *(none)* | Enable the **pull-mode hub** (see below) with exe.dev identity registration: tokenless, names bound to the platform-verified caller VM. |
+| `--hub-agent-token` / `--hub-agent-token-file` | `$BOXEL_HUB_AGENT_TOKEN` | Enable the pull-mode hub with token registration (non-exe.dev deployments; composes with the above). |
+| `--hub-agent-listen` | *(disabled)* | Extra listener serving only the agent registration endpoint. |
+| `--hub-advertise-url` | *(reflection discovery / fetch URL)* | Base URL agents dial; embedded in the `/install-agent` script. |
 
 For HTTP, at least one of `--token` / `--owner-email` must be set — the server refuses to listen unauthenticated.
+
+## Pull mode: one hub, many non-routable VMs
+
+### The model
+
+One routable boxel instance — the **hub** — multiplexes MCP for boxel
+instances on VMs that expose no inbound HTTP port (their forwarded port stays
+free for the workload you're actually developing). On each such VM a small
+**agent** (`boxel-agent`) dials *out* to the hub, registers under the VM's
+short hostname over a reverse HTTP/2 channel, and forwards proxied requests
+to the local boxel (default `http://127.0.0.1:8080`). The hub proxies the
+whole `/vm/<name>/` base path over that channel, so for VM `foobar`:
+
+- MCP endpoint: `https://<hub-vm>.exe.xyz/vm/foobar/mcp`
+- any other path under `/vm/foobar/` also reaches `foobar` (e.g.
+  `/vm/foobar/healthz` hits the local instance's health check)
+
+One connector origin and one credential cover the whole fleet: `/vm/…` and
+`/agents` (the JSON registry) sit behind the hub's normal client auth
+(`--token` / `--owner-email`), the same as its own `/mcp`.
+
+On exe.dev there is no VM-to-VM network; agents reach the hub through a
+**peer integration** — an exe.dev-managed proxy at
+`http://boxel-hub.int.exe.xyz/` that authenticates the calling VM to the
+hub's edge and stamps the unforgeable caller VM name in `X-Exedev-Source-Vm`.
+Registration is therefore **tokenless**: the hub accepts a registration when
+the edge-injected `X-ExeDev-Email` equals `--hub-agent-owner-email`, and the
+agent's handle is taken from the verified source-VM header. Agents
+autodiscover the hub by querying the default `reflection` integration for an
+attached http-proxy integration named `boxel-hub`. (Non-exe.dev deployments
+use `--hub-agent-token` instead; both methods can be enabled at once.)
+
+### Setup runbook (exe.dev)
+
+Placeholders: `HUB_VM` = the hub's VM name, `YOU@EXAMPLE.COM` = your exe.dev
+account email (an agent can read it on any VM from
+`curl -s https://reflection.int.exe.xyz/email`).
+
+**Step 1 — on the hub VM**: run tunnel-mcp with the hub enabled. `--http`
+requires client auth; with the VM kept private, edge SSO + `--owner-email` is
+enough. Bind to `127.0.0.1` so the edge is the only path in, and make sure
+the edge forwards to that port (`ssh exe.dev share port HUB_VM 8080`).
+
+```sh
+go build -o /usr/local/bin/tunnel-mcp ./cmd/tunnel-mcp   # or: GOBIN=/usr/local/bin go install github.com/mkmik/boxel/cmd/tunnel-mcp@latest
+tunnel-mcp --http 127.0.0.1:8080 --workspace /home/agent/work \
+  --owner-email YOU@EXAMPLE.COM \
+  --hub-agent-owner-email YOU@EXAMPLE.COM
+```
+
+(For a production systemd unit and hardening, see
+[`docs/deployment.md`](docs/deployment.md); add the `--hub-agent-owner-email`
+flag to its `ExecStart`.)
+
+**Step 2 — once, from any shell with your exe.dev SSH key** (laptop or the
+exe.dev web UI at `/integrations`; VMs themselves normally can't run
+`ssh exe.dev` account commands): create the fleet's peer integration,
+attached by tag:
+
+```sh
+ssh exe.dev integrations add http-proxy --name boxel-hub \
+  --target https://HUB_VM.exe.xyz/ --peer --attach tag:boxel
+```
+
+**Step 3 — per fleet VM**: attach the integration by tagging the VM (same
+place as step 2), and install the agent on the VM (needs a Go toolchain
+≥ 1.25 and systemd). **Steps 2/3a and 3b can happen in either order** — the
+installer succeeds even while the integration is missing, and the agent
+service retries discovery every backoff cycle until it appears.
+
+```sh
+ssh exe.dev tag SOME_VM boxel               # from your shell (or the web UI)
+# on SOME_VM — works regardless of whether the integration exists yet:
+GOBIN=/usr/local/bin go install github.com/mkmik/boxel/cmd/boxel-agent@latest
+sudo /usr/local/bin/boxel-agent setup
+# equivalent shortcut once the integration IS attached:
+#   curl -fsSL http://boxel-hub.int.exe.xyz/install-agent | sudo bash
+```
+
+`boxel-agent setup` installs the binary, creates a `boxel-agent` system user,
+writes `/etc/boxel-agent/env`, and enables a hardened `boxel-agent.service`.
+It then reports hub reachability: if the peer integration isn't attached yet
+it prints an **ACTION REQUIRED** block with the exact `integrations add` /
+`tag` commands to relay to the account owner, states that the installation
+itself SUCCEEDED (an unattended agent must not retry or roll back), and the
+service connects automatically once the integration appears. If
+`/etc/tunnel-mcp/token` exists on the VM (the local boxel's bearer token), it
+is copied so forwarded requests authenticate to the local instance
+automatically; run the local tunnel-mcp on `127.0.0.1:8080` with
+`--token-file /etc/tunnel-mcp/token` to match, or set `BOXEL_AGENT_TARGET`
+at install time for a different port.
+
+**VM-description snippet** — paste this into a VM's description so a coding
+agent (e.g. Shelley) performs the install autonomously, even before the
+integration exists:
+
+> Set up the boxel fleet agent: ensure a Go toolchain is installed, then run
+> `GOBIN=/usr/local/bin go install github.com/mkmik/boxel/cmd/boxel-agent@latest`
+> and `sudo /usr/local/bin/boxel-agent setup`, and follow the command's
+> output. If it prints ACTION REQUIRED, the install still succeeded: relay
+> the printed commands to the user, do not retry or uninstall, and check
+> `journalctl -u boxel-agent -n 3` later until it logs "registered with hub".
+
+**Step 4 — verify**:
+
+```sh
+# on the fleet VM: the agent should log "registered with hub"
+systemctl status boxel-agent && journalctl -u boxel-agent -n 5
+# from an authorized client (e.g. your browser via edge SSO):
+#   https://HUB_VM.exe.xyz/agents            → lists the VM
+#   https://HUB_VM.exe.xyz/vm/SOME_VM/healthz → "ok" from the VM's local boxel
+```
+
+**Step 5 — connect Claude**: point the MCP connector at
+`https://HUB_VM.exe.xyz/vm/SOME_VM/mcp` with the hub's credentials (see
+[`docs/deployment.md`](docs/deployment.md) for the connector auth options).
+The VM's own public hostname stays free: `ssh exe.dev share port SOME_VM
+<your-app-port>` gives it entirely to the app you're developing.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| agent logs `hub autodiscovery: no http-proxy integration named "boxel-hub"` | VM not tagged (step 3) or integration missing (step 2). Discovery retries every backoff cycle, so fixing the tag is enough. |
+| agent logs `hub refused registration: 401` | Hub not started with `--hub-agent-owner-email`, or its value doesn't match the account that owns the VMs. |
+| agent registers, then the channel drops immediately after the 101 | An intermediary isn't passing the `Upgrade: boxel-h2c` handshake through — report it. |
+| `/vm/<name>/…` returns 502 `vm_not_connected` | Agent not running/registered on that VM — check step 4. |
+| proxied requests get 401 from the *local* boxel | The agent isn't injecting the local token: ensure `/etc/boxel-agent/target-token` exists (rerun the installer after creating `/etc/tunnel-mcp/token`) or set `BOXEL_AGENT_TARGET_TOKEN_FILE` in `/etc/boxel-agent/env` and restart `boxel-agent`. |
+
+Full details (generic token-based deployments, security model, design notes):
+[`docs/pull-mode.md`](docs/pull-mode.md).
 
 ## Permissions
 
@@ -132,4 +267,7 @@ Package layout:
 | `internal/audit` | Append-only JSONL audit log. |
 | `internal/metrics` | Prometheus instrumentation. |
 | `internal/tunnel` | MCP server wiring: envelope → policy → elicitation → harness → audit/metrics. |
-| `cmd/tunnel-mcp` | Binary: stdio + streamable HTTP transports, bearer auth, flags. |
+| `internal/hub` | Pull-mode multiplexer: agent registry, reverse HTTP/2 registration, `/vm/<name>/` proxy, installer script. |
+| `internal/hubagent` | Pull-mode agent runtime: dial-out, reconnect, forwarding to the local instance. |
+| `cmd/tunnel-mcp` | Binary: stdio + streamable HTTP transports, bearer auth, hub mode, flags. |
+| `cmd/boxel-agent` | Pull-mode agent binary for non-routable VMs. |

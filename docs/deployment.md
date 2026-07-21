@@ -182,4 +182,4 @@ sudo nft add rule inet tunnel out meta skuid agent drop
 
 ## Topology note (v2)
 
-For dynamic fleets (the shelly / exe-clone integration in the PRD), the v2 topology is a central **gateway** that terminates MCP/OAuth and forwards envelopes over gRPC/SSH to a thin per-VM agent, with `session` gaining a `vm` field. The co-located deployment above is the v1 shape; the harness and permission engine are unchanged by the gateway split.
+For dynamic fleets, a central hub can now front VMs that expose no inbound port at all: **pull mode**. A per-VM agent dials out to the hub and registers under its hostname, and the hub proxies `https://<hub>/vm/<name>/mcp` to it over a reverse HTTP/2 channel — one connector origin and one credential for the whole fleet. See [`pull-mode.md`](pull-mode.md).
