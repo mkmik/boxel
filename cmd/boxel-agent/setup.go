@@ -23,6 +23,9 @@ const (
 	envPath         = "/etc/boxel-agent/env"
 	unitPath        = "/etc/systemd/system/boxel-agent.service"
 	unitName        = "boxel-agent.service"
+	updateUnitPath  = "/etc/systemd/system/boxel-agent-update.service"
+	updateTimerPath = "/etc/systemd/system/boxel-agent-update.timer"
+	updateTimerName = "boxel-agent-update.timer"
 	serviceUser     = "boxel-agent"
 	localTokenPath  = "/etc/tunnel-mcp/token"
 	targetTokenPath = "/etc/boxel-agent/target-token"
@@ -55,9 +58,39 @@ MemoryDenyWriteExecute=true
 WantedBy=multi-user.target
 `
 
+// The self-update pair: a root oneshot that runs `boxel-agent update` (it
+// replaces /usr/local/bin/boxel-agent and restarts the service, so it cannot
+// run as the service user), fired by a timer every 5 minutes. HOME points at
+// a cache dir because oneshot units have no HOME and the Go toolchain needs
+// one for its module/build caches.
+const updateServiceUnit = `[Unit]
+Description=boxel-agent self-update (installs the latest boxel-agent release)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/boxel-agent update
+Environment=HOME=/var/cache/boxel-agent-update
+PrivateTmp=true
+`
+
+const updateTimerUnit = `[Unit]
+Description=poll for boxel-agent updates every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target
+`
+
 // runSetup implements `boxel-agent setup`: a self-contained, hub-independent
 // installer. It copies the running binary to /usr/local/bin, creates the
-// service user, writes /etc/boxel-agent/env, and enables the systemd unit.
+// service user, writes /etc/boxel-agent/env, and enables the systemd unit
+// plus a timer that polls for and installs agent updates every 5 minutes.
 // It deliberately succeeds even when the hub is not reachable yet (e.g. the
 // exe.dev peer integration has not been created or attached): the service
 // retries discovery and registration forever, so setup finishes by telling
@@ -120,14 +153,21 @@ func runSetup(args []string) error {
 		return err
 	}
 
-	fmt.Printf("==> installing and starting %s\n", unitName)
-	if err := os.WriteFile(unitPath, []byte(systemdUnit), 0o644); err != nil {
-		return err
+	fmt.Printf("==> installing and starting %s (with self-update timer %s)\n", unitName, updateTimerName)
+	for _, u := range []struct{ path, content string }{
+		{unitPath, systemdUnit},
+		{updateUnitPath, updateServiceUnit},
+		{updateTimerPath, updateTimerUnit},
+	} {
+		if err := os.WriteFile(u.path, []byte(u.content), 0o644); err != nil {
+			return err
+		}
 	}
 	for _, cmd := range [][]string{
 		{"systemctl", "daemon-reload"},
 		{"systemctl", "enable", unitName},
 		{"systemctl", "restart", unitName},
+		{"systemctl", "enable", "--now", updateTimerName},
 	} {
 		if out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput(); err != nil {
 			return fmt.Errorf("%s: %w: %s", strings.Join(cmd, " "), err, strings.TrimSpace(string(out)))

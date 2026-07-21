@@ -65,6 +65,8 @@ var installerTmpl = template.Must(template.New("installer").Parse(`#!/usr/bin/en
 # Installs the pull-mode boxel agent on this VM:
 #   - builds boxel-agent with 'go install'
 #   - registers and starts a systemd unit (boxel-agent.service)
+#   - enables a self-update timer (boxel-agent-update.timer) that polls for
+#     newer boxel-agent releases every 5 minutes and installs them
 # The agent dials out to the hub and registers under this VM's short
 # hostname; the VM then becomes reachable at {{.PublicURL}}/vm/<hostname>/
 # (MCP endpoint: {{.PublicURL}}/vm/<hostname>/mcp) with no inbound port.

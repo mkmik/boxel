@@ -160,7 +160,9 @@ sudo /usr/local/bin/boxel-agent setup
 ```
 
 `boxel-agent setup` installs the binary, creates a `boxel-agent` system user,
-writes `/etc/boxel-agent/env`, and enables a hardened `boxel-agent.service`.
+writes `/etc/boxel-agent/env`, and enables a hardened `boxel-agent.service`,
+plus a `boxel-agent-update.timer` that polls the Go module proxy every 5
+minutes and automatically installs newer boxel-agent releases.
 It then reports hub reachability: if the peer integration isn't attached yet
 it prints an **ACTION REQUIRED** block with the exact `integrations add` /
 `tag` commands to relay to the account owner, states that the installation
