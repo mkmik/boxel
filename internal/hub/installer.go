@@ -108,68 +108,20 @@ command -v go >/dev/null 2>&1 || { echo "error: Go toolchain not found (needed f
 echo "==> go install $MODULE"
 GOBIN=/usr/local/bin go install "$MODULE"
 
-echo "==> configuring /etc/boxel-agent"
-id boxel-agent >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin boxel-agent
-install -d -m 750 -o root -g boxel-agent /etc/boxel-agent
-ENV_FILE=/etc/boxel-agent/env
-{
-  if [ -n "$HUB_URL" ]; then
-    printf 'BOXEL_HUB_URL=%s\n' "$HUB_URL"
-  fi
-  if [ -n "$HUB_INTEGRATION" ]; then
-    printf 'BOXEL_HUB_INTEGRATION=%s\n' "$HUB_INTEGRATION"
-  fi
-  if [ -n "$AGENT_TOKEN" ]; then
-    printf 'BOXEL_AGENT_TOKEN=%s\n' "$AGENT_TOKEN"
-  fi
-  printf 'BOXEL_AGENT_NAME=%s\n' "$AGENT_NAME"
-  printf 'BOXEL_AGENT_TARGET=%s\n' "$TARGET_URL"
-} > "$ENV_FILE"
-# Reuse the local tunnel-mcp bearer token (if present) so forwarded requests
-# authenticate to the boxel instance running on this VM.
-if [ -r /etc/tunnel-mcp/token ]; then
-  install -m 640 -o root -g boxel-agent /etc/tunnel-mcp/token /etc/boxel-agent/target-token
-  printf 'BOXEL_AGENT_TARGET_TOKEN_FILE=/etc/boxel-agent/target-token\n' >> "$ENV_FILE"
-fi
-chown root:boxel-agent "$ENV_FILE"
-chmod 640 "$ENV_FILE"
-
-echo "==> installing systemd unit"
-cat > /etc/systemd/system/boxel-agent.service <<'UNIT'
-[Unit]
-Description=boxel pull-mode agent (reverse tunnel to the boxel hub)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=boxel-agent
-Group=boxel-agent
-EnvironmentFile=/etc/boxel-agent/env
-ExecStart=/usr/local/bin/boxel-agent
-Restart=always
-RestartSec=2
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-LockPersonality=true
-MemoryDenyWriteExecute=true
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-systemctl daemon-reload
-systemctl enable --now boxel-agent
-systemctl --no-pager --lines=3 status boxel-agent || true
+# The heavy lifting (service user, /etc/boxel-agent/env, systemd unit, local
+# token reuse, hub reachability report) lives in the binary itself, so a VM
+# that cannot reach the hub yet can bootstrap the same way with just:
+#   go install {{.Module}}/cmd/boxel-agent@{{.ModuleVersion}} && sudo boxel-agent setup
+env \
+  BOXEL_HUB_URL="$HUB_URL" \
+  BOXEL_HUB_INTEGRATION="$HUB_INTEGRATION" \
+  BOXEL_AGENT_TOKEN="$AGENT_TOKEN" \
+  BOXEL_AGENT_NAME="$AGENT_NAME" \
+  BOXEL_AGENT_TARGET="$TARGET_URL" \
+  /usr/local/bin/boxel-agent setup
 
 echo
-echo "boxel-agent installed; registering with ${HUB_URL:-the autodiscovered hub} as \"$AGENT_NAME\"."
-echo "Once connected, this VM is reachable through the hub at:"
+echo "Once registered, this VM is reachable through the hub at:"
 echo "  {{.PublicURL}}/vm/$AGENT_NAME/"
 echo "MCP endpoint:"
 echo "  {{.PublicURL}}/vm/$AGENT_NAME/mcp"

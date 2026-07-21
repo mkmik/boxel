@@ -251,7 +251,7 @@ func TestInstallerTokenEmbedding(t *testing.T) {
 	if strings.Contains(body, "sekrit-token") {
 		t.Error("unauthenticated installer leaked the agent token")
 	}
-	for _, want := range []string{"#!/usr/bin/env bash", "http://boxel.internal:8081", "go install", "boxel-agent.service", "systemctl enable --now boxel-agent"} {
+	for _, want := range []string{"#!/usr/bin/env bash", "http://boxel.internal:8081", "go install", "boxel-agent setup"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("installer script missing %q", want)
 		}

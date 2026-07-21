@@ -7,8 +7,15 @@
 // exposing any inbound port.
 //
 // Every flag falls back to an environment variable so the systemd unit can be
-// configured entirely from /etc/boxel-agent/env (see the hub's /install-agent
-// script).
+// configured entirely from /etc/boxel-agent/env.
+//
+// The `setup` subcommand is a self-contained installer (run as root): it
+// copies the binary to /usr/local/bin, creates the boxel-agent service user,
+// writes /etc/boxel-agent/env, and enables a hardened systemd unit. It
+// succeeds even when the hub is not reachable yet — the service keeps
+// retrying, and setup prints exactly what remains to be done (e.g. attaching
+// the exe.dev peer integration). The hub's /install-agent script is a thin
+// wrapper around `go install` + `boxel-agent setup`.
 package main
 
 import (
@@ -29,6 +36,12 @@ import (
 const Version = "0.1.0"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "setup" {
+		if err := runSetup(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	var (
 		hubURL          string
 		hubIntegration  string

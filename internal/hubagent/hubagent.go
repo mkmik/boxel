@@ -104,6 +104,8 @@ func Run(ctx context.Context, cfg Config) error {
 	handler := newProxyHandler(target, cfg.TargetToken)
 
 	backoff := cfg.MinBackoff
+	var lastErr string
+	var lastLogged time.Time
 	for {
 		start := time.Now()
 		err := connectCycle(ctx, cfg, handler)
@@ -114,7 +116,13 @@ func Run(ctx context.Context, cfg Config) error {
 		if time.Since(start) > time.Minute {
 			backoff = cfg.MinBackoff
 		}
-		cfg.Logf("boxel-agent: hub connection: %v; retrying in %s", err, backoff)
+		// A steady-state failure (e.g. waiting for the hub integration to be
+		// attached) would otherwise log every backoff cycle; repeat the same
+		// message at most every 5 minutes.
+		if msg := err.Error(); msg != lastErr || time.Since(lastLogged) > 5*time.Minute {
+			cfg.Logf("boxel-agent: hub connection: %v; retrying (backoff %s, repeats suppressed)", err, backoff)
+			lastErr, lastLogged = msg, time.Now()
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -142,7 +150,7 @@ func validateBaseURL(s string) error {
 func connectCycle(ctx context.Context, cfg Config, handler http.Handler) error {
 	hubURL := cfg.HubURL
 	if hubURL == "" {
-		discovered, err := discoverHubURL(ctx, cfg.ReflectionURL, cfg.HubIntegration)
+		discovered, err := DiscoverHubURL(ctx, cfg.ReflectionURL, cfg.HubIntegration)
 		if err != nil {
 			return fmt.Errorf("hub autodiscovery: %w (pass --hub / BOXEL_HUB_URL to skip discovery)", err)
 		}
@@ -168,11 +176,16 @@ type reflectionIntegrations struct {
 
 var helpURLRe = regexp.MustCompile(`https?://[^\s"']+`)
 
-// discoverHubURL finds the hub's peer integration through the exe.dev
+// DiscoverHubURL finds the hub's peer integration through the exe.dev
 // reflection integration and returns its base URL. It prefers the URL in the
 // integration's help text (exe.dev's canonical usage hint), falling back to
-// <name>.<int-domain> derived from the reflection host.
-func discoverHubURL(ctx context.Context, reflectionURL, integration string) (string, error) {
+// <name>.<int-domain> derived from the reflection host. A not-found error
+// explains how to attach the integration: it is the expected state when the
+// agent is installed before the fleet integration is set up.
+func DiscoverHubURL(ctx context.Context, reflectionURL, integration string) (string, error) {
+	if reflectionURL == "" {
+		reflectionURL = "https://reflection.int.exe.xyz"
+	}
 	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet, strings.TrimSuffix(reflectionURL, "/")+"/integrations", nil)
@@ -207,7 +220,7 @@ func discoverHubURL(ctx context.Context, reflectionURL, integration string) (str
 		}
 		break
 	}
-	return "", fmt.Errorf("no http-proxy integration named %q attached to this VM (checked %s)", integration, reflectionURL)
+	return "", fmt.Errorf("the hub's peer integration %q is not attached to this VM yet (checked %s) — create it (ssh exe.dev integrations add http-proxy --name %s --target https://<hub-vm>.exe.xyz/ --peer --attach tag:boxel) and tag this VM (ssh exe.dev tag <vm> boxel); the agent will connect automatically once attached", integration, reflectionURL, integration)
 }
 
 // runOnce performs one dial → register → serve cycle, returning when the

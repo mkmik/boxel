@@ -145,21 +145,43 @@ ssh exe.dev integrations add http-proxy --name boxel-hub \
 ```
 
 **Step 3 — per fleet VM**: attach the integration by tagging the VM (same
-place as step 2), then install the agent on the VM (needs a Go toolchain
-≥ 1.25 and systemd; the installer errors clearly if either is missing):
+place as step 2), and install the agent on the VM (needs a Go toolchain
+≥ 1.25 and systemd). **Steps 2/3a and 3b can happen in either order** — the
+installer succeeds even while the integration is missing, and the agent
+service retries discovery every backoff cycle until it appears.
 
 ```sh
-ssh exe.dev tag SOME_VM boxel                                  # from your shell
-curl -fsSL http://boxel-hub.int.exe.xyz/install-agent | sudo bash   # on SOME_VM
+ssh exe.dev tag SOME_VM boxel               # from your shell (or the web UI)
+# on SOME_VM — works regardless of whether the integration exists yet:
+GOBIN=/usr/local/bin go install github.com/mkmik/boxel/cmd/boxel-agent@latest
+sudo /usr/local/bin/boxel-agent setup
+# equivalent shortcut once the integration IS attached:
+#   curl -fsSL http://boxel-hub.int.exe.xyz/install-agent | sudo bash
 ```
 
-The installer `go install`s `cmd/boxel-agent`, creates a `boxel-agent` system
-user, writes `/etc/boxel-agent/env`, and enables a hardened
-`boxel-agent.service`. If `/etc/tunnel-mcp/token` exists on the VM (the local
-boxel's bearer token), it is copied so forwarded requests authenticate to the
-local instance automatically; run the local tunnel-mcp on `127.0.0.1:8080`
-with `--token-file /etc/tunnel-mcp/token` to match, or set
-`BOXEL_AGENT_TARGET` at install time for a different port.
+`boxel-agent setup` installs the binary, creates a `boxel-agent` system user,
+writes `/etc/boxel-agent/env`, and enables a hardened `boxel-agent.service`.
+It then reports hub reachability: if the peer integration isn't attached yet
+it prints an **ACTION REQUIRED** block with the exact `integrations add` /
+`tag` commands to relay to the account owner, states that the installation
+itself SUCCEEDED (an unattended agent must not retry or roll back), and the
+service connects automatically once the integration appears. If
+`/etc/tunnel-mcp/token` exists on the VM (the local boxel's bearer token), it
+is copied so forwarded requests authenticate to the local instance
+automatically; run the local tunnel-mcp on `127.0.0.1:8080` with
+`--token-file /etc/tunnel-mcp/token` to match, or set `BOXEL_AGENT_TARGET`
+at install time for a different port.
+
+**VM-description snippet** — paste this into a VM's description so a coding
+agent (e.g. Shelley) performs the install autonomously, even before the
+integration exists:
+
+> Set up the boxel fleet agent: ensure a Go toolchain is installed, then run
+> `GOBIN=/usr/local/bin go install github.com/mkmik/boxel/cmd/boxel-agent@latest`
+> and `sudo /usr/local/bin/boxel-agent setup`, and follow the command's
+> output. If it prints ACTION REQUIRED, the install still succeeded: relay
+> the printed commands to the user, do not retry or uninstall, and check
+> `journalctl -u boxel-agent -n 3` later until it logs "registered with hub".
 
 **Step 4 — verify**:
 
