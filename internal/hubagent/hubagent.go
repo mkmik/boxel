@@ -42,7 +42,7 @@ type Config struct {
 	// Default https://reflection.int.exe.xyz.
 	ReflectionURL string
 	// HubIntegration is the name of the hub's peer integration to discover
-	// via reflection. Default "boxel-hub".
+	// via reflection. Default "boxel".
 	HubIntegration string
 	// Token is the hub's agent registration bearer token. Optional: on
 	// exe.dev the peer integration authenticates the agent as the owner, and
@@ -87,7 +87,7 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.ReflectionURL = "https://reflection.int.exe.xyz"
 	}
 	if cfg.HubIntegration == "" {
-		cfg.HubIntegration = "boxel-hub"
+		cfg.HubIntegration = "boxel"
 	}
 	if !hub.ValidName(cfg.Name) {
 		return fmt.Errorf("invalid agent name %q: want 1-63 chars of [a-z0-9-], not starting/ending with -", cfg.Name)

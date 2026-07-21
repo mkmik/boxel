@@ -69,8 +69,8 @@ func main() {
 		targetToken     string
 		targetTokenFile string
 	)
-	flag.StringVar(&hubURL, "hub", os.Getenv("BOXEL_HUB_URL"), "base URL of the boxel hub to register with, e.g. http://boxel-hub.int.exe.xyz (or BOXEL_HUB_URL); empty = autodiscover the hub's peer integration via exe.dev reflection")
-	flag.StringVar(&hubIntegration, "hub-integration", os.Getenv("BOXEL_HUB_INTEGRATION"), "name of the hub's peer integration to autodiscover via reflection (or BOXEL_HUB_INTEGRATION; default boxel-hub)")
+	flag.StringVar(&hubURL, "hub", os.Getenv("BOXEL_HUB_URL"), "base URL of the boxel hub to register with, e.g. http://boxel.int.exe.xyz (or BOXEL_HUB_URL); empty = autodiscover the hub's peer integration via exe.dev reflection")
+	flag.StringVar(&hubIntegration, "hub-integration", os.Getenv("BOXEL_HUB_INTEGRATION"), "name of the hub's peer integration to autodiscover via reflection (or BOXEL_HUB_INTEGRATION; default boxel)")
 	flag.StringVar(&reflectionURL, "reflection-url", os.Getenv("BOXEL_REFLECTION_URL"), "base URL of the exe.dev reflection integration used for autodiscovery (or BOXEL_REFLECTION_URL; default https://reflection.int.exe.xyz)")
 	flag.StringVar(&token, "token", "", "agent registration bearer token (or BOXEL_AGENT_TOKEN); not needed when the hub accepts exe.dev identity registration")
 	flag.StringVar(&tokenFile, "token-file", os.Getenv("BOXEL_AGENT_TOKEN_FILE"), "read the registration token from this file")

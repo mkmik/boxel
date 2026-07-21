@@ -18,7 +18,7 @@ Claude connector ── https://boxel.exe.xyz/vm/foobar/mcp
                  │  /install-agent  ── curl|bash installer
                  │  /hub/connect    ── agent registration (reverse channel)
                  └────────▲─────────┘
-                          │ exe.dev peer integration (boxel-hub.int.exe.xyz)
+                          │ exe.dev peer integration (boxel.int.exe.xyz)
                           │ — authenticated, outbound-only
                  ┌────────┴─────────┐
                  │   boxel-agent    │  VM "foobar" (no exposed port needed)
@@ -86,22 +86,22 @@ on — no self-asserted names, no token to leak or rotate.
 is the fleet-membership switch):
 
 ```sh
-ssh exe.dev integrations add http-proxy --name boxel-hub \
+ssh exe.dev integrations add http-proxy --name boxel \
   --target https://<hub-vm>.exe.xyz/ --peer --attach tag:boxel
 ```
 
 **3. On each VM you want in the fleet:**
 
 ```sh
-ssh exe.dev tag <vm> boxel        # attaches the boxel-hub integration
+ssh exe.dev tag <vm> boxel        # attaches the boxel integration
 # then, on the VM:
-curl -fsSL http://boxel-hub.int.exe.xyz/install-agent | sudo bash
+curl -fsSL http://boxel.int.exe.xyz/install-agent | sudo bash
 ```
 
 The agent **autodiscovers the hub**: every exe.dev VM has the default
 `reflection` integration, and the agent queries
 `https://reflection.int.exe.xyz/integrations` for an attached http-proxy
-integration named `boxel-hub` (override with `--hub-integration` /
+integration named `boxel` (override with `--hub-integration` /
 `BOXEL_HUB_INTEGRATION`) and dials it. Discovery re-runs on every reconnect
 attempt, so tagging a VM after the agent is installed also works.
 
@@ -147,7 +147,7 @@ GOBIN=/usr/local/bin go install github.com/mkmik/boxel/cmd/boxel-agent@latest
 sudo /usr/local/bin/boxel-agent setup
 
 # equivalent shortcuts once the hub is reachable:
-curl -fsSL http://boxel-hub.int.exe.xyz/install-agent | sudo bash   # exe.dev
+curl -fsSL http://boxel.int.exe.xyz/install-agent | sudo bash       # exe.dev
 curl -fsSL https://<hub>/install-agent | sudo bash                  # generic
 ```
 
@@ -186,8 +186,8 @@ Everything is overridable at install time via `BOXEL_HUB_URL`,
 ## Running the agent by hand
 
 ```sh
-boxel-agent                      # exe.dev: discovers boxel-hub via reflection
-boxel-agent --hub http://boxel-hub.int.exe.xyz          # explicit hub URL
+boxel-agent                      # exe.dev: discovers the boxel integration via reflection
+boxel-agent --hub http://boxel.int.exe.xyz              # explicit hub URL
 boxel-agent --hub https://hub.example.com --token-file /etc/boxel-agent/token \
   --name foobar --target http://127.0.0.1:8080 \
   --target-token-file /etc/tunnel-mcp/token             # generic deployment
@@ -225,7 +225,7 @@ driving the VM through boxel from a Claude connector.
 
 1. Run tunnel-mcp on `foobar` bound to `127.0.0.1:8080` (no exposed port).
 2. `ssh exe.dev tag foobar boxel`, then on the VM:
-   `curl -fsSL http://boxel-hub.int.exe.xyz/install-agent | sudo bash`.
+   `curl -fsSL http://boxel.int.exe.xyz/install-agent | sudo bash`.
 3. Point the Claude connector at `https://<hub-vm>.exe.xyz/vm/foobar/mcp` with
    the hub's credentials.
 4. `ssh exe.dev share port foobar <your-app-port>` — the VM's public hostname

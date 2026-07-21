@@ -32,11 +32,11 @@ func TestReportHubStatusNotReady(t *testing.T) {
 	out := captureStdout(t, func() {
 		// Unreachable reflection endpoint → discovery fails like on a VM
 		// where the peer integration (and reflection route) isn't set up.
-		reportHubStatus("", "boxel-hub", "http://127.0.0.1:1/nowhere", "foobar")
+		reportHubStatus("", "boxel", "http://127.0.0.1:1/nowhere", "foobar")
 	})
 	for _, want := range []string{
 		"ACTION REQUIRED",
-		"integrations add http-proxy --name boxel-hub",
+		"integrations add http-proxy --name boxel",
 		"ssh exe.dev tag",
 		"installation has\nSUCCEEDED",
 		"journalctl -u boxel-agent.service",
