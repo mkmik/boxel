@@ -21,10 +21,13 @@ import (
 	"github.com/mkmik/boxel/internal/metrics"
 	"github.com/mkmik/boxel/internal/policy"
 	"github.com/mkmik/boxel/internal/session"
+	"github.com/mkmik/boxel/internal/version"
 )
 
-// Version is the server version reported over MCP and in `describe`.
-const Version = "0.1.0"
+// Version is the server version reported over MCP and in `describe`,
+// derived from the build info the toolchain embeds (so `go install
+// module@version` builds report their module version).
+var Version = version.String()
 
 // Config assembles the tunnel server's collaborators.
 type Config struct {

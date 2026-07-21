@@ -30,10 +30,13 @@ import (
 	"syscall"
 
 	"github.com/mkmik/boxel/internal/hubagent"
+	"github.com/mkmik/boxel/internal/version"
 )
 
-// Version is reported to the hub on registration.
-const Version = "0.1.0"
+// Version is reported to the hub on registration, derived from the build
+// info the toolchain embeds (so `go install module@version` builds report
+// their module version).
+var Version = version.String()
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "setup" {
