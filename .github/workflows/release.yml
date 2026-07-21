@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*"
+  # Called by auto-release.yml after it pushes a tag: tags pushed with
+  # GITHUB_TOKEN do not trigger the tag-push event above.
+  workflow_call:
 
 permissions:
   contents: write

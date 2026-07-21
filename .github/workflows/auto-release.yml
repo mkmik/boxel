@@ -1,0 +1,64 @@
+name: Auto Release
+
+# Cut a new minor release for every push to main (i.e. every merged PR).
+# Tags pushed with GITHUB_TOKEN do not trigger the tag-push release
+# workflow, so this workflow calls it directly after tagging.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+# Serialize runs so concurrent merges can't race on the next version.
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: tag next minor version
+    runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.tag.outputs.created }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history and tags are needed to find the latest version.
+          fetch-depth: 0
+
+      - name: Compute and push next minor tag
+        id: tag
+        run: |
+          set -euo pipefail
+          echo "created=false" >> "$GITHUB_OUTPUT"
+          existing=$(git tag --points-at HEAD --list 'v*')
+          if [ -n "$existing" ]; then
+            echo "HEAD is already tagged ($existing); skipping"
+            exit 0
+          fi
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          if [ -z "$latest" ]; then
+            next="v0.1.0"
+          else
+            base=${latest#v}
+            major=${base%%.*}
+            rest=${base#*.}
+            minor=${rest%%.*}
+            next="v${major}.$((minor + 1)).0"
+          fi
+          echo "Tagging ${GITHUB_SHA} as ${next} (previous: ${latest:-none})"
+          git tag "$next" "$GITHUB_SHA"
+          git push origin "refs/tags/$next"
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: release
+    needs: tag
+    if: needs.tag.outputs.created == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
