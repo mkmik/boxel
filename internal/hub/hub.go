@@ -100,6 +100,10 @@ type Hub struct {
 
 	mu     sync.Mutex
 	agents map[string]*agentConn
+	// registry remembers every agent that has registered since the hub
+	// started, including ones that later disconnected, so the dashboard can
+	// show them as offline instead of forgetting them.
+	registry map[string]*agentRecord
 }
 
 // agentConn is one registered agent: a live reverse HTTP/2 channel.
@@ -123,12 +127,28 @@ func (a *agentConn) close() {
 	})
 }
 
+// agentRecord is the durable view of an agent: it survives the agent's
+// channel so status ("connected"/"disconnected") and traffic counters outlive
+// reconnects. Guarded by Hub.mu.
+type agentRecord struct {
+	remoteAddr     string // last known
+	version        string
+	connected      bool
+	connectedAt    time.Time // last (re-)registration
+	disconnectedAt time.Time // zero while connected
+	messages       int64     // requests proxied through the mux to this agent
+}
+
 // AgentInfo is the public view of a registered agent.
 type AgentInfo struct {
-	Name        string    `json:"name"`
-	RemoteAddr  string    `json:"remote_addr"`
-	Version     string    `json:"version,omitempty"`
-	ConnectedAt time.Time `json:"connected_at"`
+	Name           string    `json:"name"`
+	RemoteAddr     string    `json:"remote_addr"`
+	Version        string    `json:"version,omitempty"`
+	Connected      bool      `json:"connected"`
+	ConnectedAt    time.Time `json:"connected_at"`
+	DisconnectedAt time.Time `json:"disconnected_at,omitzero"`
+	// Messages counts the requests the mux proxied to this agent.
+	Messages int64 `json:"messages"`
 }
 
 // errNotConnected reports a /vm/<name>/ request for an agent that is not
@@ -148,8 +168,9 @@ func New(cfg Config) *Hub {
 		cfg.Logf = log.Printf
 	}
 	h := &Hub{
-		cfg:    cfg,
-		agents: map[string]*agentConn{},
+		cfg:      cfg,
+		agents:   map[string]*agentConn{},
+		registry: map[string]*agentRecord{},
 		// AllowHTTP lets RoundTrip accept the http scheme; the channel itself
 		// is the already-established (possibly TLS) agent connection.
 		tr: &http2.Transport{AllowHTTP: true},
@@ -204,6 +225,7 @@ func (rt agentRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	if a == nil {
 		return nil, errNotConnected{name}
 	}
+	rt.h.countMessage(name)
 	res, err := a.cc.RoundTrip(req)
 	if err != nil {
 		return nil, fmt.Errorf("vm %q tunnel: %w", name, err)
@@ -212,15 +234,16 @@ func (rt agentRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 // AttachRoutes registers the hub's handlers on mux. guard (optional) wraps the
-// caller-facing endpoints — the /vm/<name>/ proxy and /agents — with the
-// hub's client auth (bearer / edge identity). The registration endpoint
-// authenticates itself with the agent token, and the installer endpoint is
-// deliberately unauthenticated (it embeds the agent token only for requests
-// that pass Config.InstallerAuth).
+// caller-facing endpoints — the / dashboard, the /vm/<name>/ proxy and
+// /agents — with the hub's client auth (bearer / edge identity). The
+// registration endpoint authenticates itself with the agent token, and the
+// installer endpoint is deliberately unauthenticated (it embeds the agent
+// token only for requests that pass Config.InstallerAuth).
 func (h *Hub) AttachRoutes(mux *http.ServeMux, guard func(http.Handler) http.Handler) {
 	if guard == nil {
 		guard = func(hh http.Handler) http.Handler { return hh }
 	}
+	mux.Handle("GET /{$}", guard(http.HandlerFunc(h.handleDashboard)))
 	mux.Handle("GET "+ConnectPath, h.ConnectHandler())
 	mux.Handle("/vm/{name}", guard(http.HandlerFunc(h.redirectVM)))
 	mux.Handle("/vm/{name}/", guard(h.proxy))
@@ -337,6 +360,16 @@ func (h *Hub) register(a *agentConn) {
 	h.mu.Lock()
 	old := h.agents[a.name]
 	h.agents[a.name] = a
+	rec := h.registry[a.name]
+	if rec == nil {
+		rec = &agentRecord{}
+		h.registry[a.name] = rec
+	}
+	rec.remoteAddr = a.remoteAddr
+	rec.version = a.version
+	rec.connected = true
+	rec.connectedAt = a.connectedAt
+	rec.disconnectedAt = time.Time{}
 	h.mu.Unlock()
 	if old != nil {
 		h.cfg.Logf("hub: agent %q reconnected from %s (%s; replacing channel from %s)", a.name, a.remoteAddr, a.auth, old.remoteAddr)
@@ -352,6 +385,10 @@ func (h *Hub) drop(a *agentConn, reason error) {
 	h.mu.Lock()
 	if h.agents[a.name] == a {
 		delete(h.agents, a.name)
+		if rec := h.registry[a.name]; rec != nil {
+			rec.connected = false
+			rec.disconnectedAt = time.Now()
+		}
 	}
 	h.mu.Unlock()
 	a.close()
@@ -387,12 +424,30 @@ func (h *Hub) lookup(name string) *agentConn {
 	return h.agents[name]
 }
 
-// Agents lists the registered agents, sorted by name.
+// countMessage records one request proxied through the mux to name.
+func (h *Hub) countMessage(name string) {
+	h.mu.Lock()
+	if rec := h.registry[name]; rec != nil {
+		rec.messages++
+	}
+	h.mu.Unlock()
+}
+
+// Agents lists every agent that has registered since the hub started —
+// connected or not — sorted by name.
 func (h *Hub) Agents() []AgentInfo {
 	h.mu.Lock()
-	out := make([]AgentInfo, 0, len(h.agents))
-	for _, a := range h.agents {
-		out = append(out, AgentInfo{Name: a.name, RemoteAddr: a.remoteAddr, Version: a.version, ConnectedAt: a.connectedAt})
+	out := make([]AgentInfo, 0, len(h.registry))
+	for name, rec := range h.registry {
+		out = append(out, AgentInfo{
+			Name:           name,
+			RemoteAddr:     rec.remoteAddr,
+			Version:        rec.version,
+			Connected:      rec.connected,
+			ConnectedAt:    rec.connectedAt,
+			DisconnectedAt: rec.disconnectedAt,
+			Messages:       rec.messages,
+		})
 	}
 	h.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
