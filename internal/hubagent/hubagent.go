@@ -101,7 +101,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
 		return fmt.Errorf("invalid target URL %q: want http(s)://host[:port][/base]", cfg.Target)
 	}
-	handler := newProxyHandler(target, cfg.TargetToken)
+	handler := newProxyHandler(cfg, target, cfg.TargetToken)
 
 	backoff := cfg.MinBackoff
 	var lastErr string
@@ -299,10 +299,19 @@ func runOnce(ctx context.Context, cfg Config, u *url.URL, handler http.Handler) 
 	return errors.New("channel closed by hub")
 }
 
+// DiagPath is the reserved path the agent answers itself instead of forwarding
+// to the local target. Reachable through the hub at /vm/<name>/__boxel-agent,
+// it works even when the local target is down — the one signal a forwarded
+// request can't give you.
+const DiagPath = "/__boxel-agent"
+
 // newProxyHandler forwards proxied requests to the local target, optionally
-// swapping in the local bearer token.
-func newProxyHandler(target *url.URL, token string) http.Handler {
-	return &httputil.ReverseProxy{
+// swapping in the local bearer token. It answers DiagPath itself, and turns a
+// failed forward into an informative JSON 502 instead of Go's default
+// empty-bodied one, so an agent that is connected but can't reach its local
+// target says so out loud.
+func newProxyHandler(cfg Config, target *url.URL, token string) http.Handler {
+	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
 			pr.SetXForwarded()
@@ -312,5 +321,84 @@ func newProxyHandler(target *url.URL, token string) http.Handler {
 		},
 		// Flush every write through immediately: MCP streamable HTTP uses SSE.
 		FlushInterval: -1,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			cfg.Logf("boxel-agent: forward to %s failed: %v", target, err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":   "agent_forward_failed",
+				"agent":   cfg.Name,
+				"target":  target.String(),
+				"message": err.Error(),
+				"hint":    "boxel-agent is connected but could not reach its local forward target; check that a server is listening there and that --target matches its address",
+			})
+		},
 	}
+	diag := &agentDiag{name: cfg.Name, version: cfg.Version, target: target}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == DiagPath || strings.HasPrefix(r.URL.Path, DiagPath+"/") {
+			diag.serve(w, r)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	})
+}
+
+// agentDiag answers DiagPath directly, reporting agent identity and a live
+// reachability probe of the local forward target.
+type agentDiag struct {
+	name    string
+	version string
+	target  *url.URL
+}
+
+func (d *agentDiag) serve(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{
+		"agent":   d.name,
+		"version": d.version,
+		"target":  d.target.String(),
+		// The agent is answering, so its channel to the hub is up by definition.
+		"agent_ok": true,
+	}
+	out["target_check"] = d.probeTarget(r.Context())
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// probeTarget dials the local target and, if reachable, does a quick HTTP GET
+// of its base URL — enough to tell "nothing listening" from "listening but
+// erroring".
+func (d *agentDiag) probeTarget(ctx context.Context) map[string]any {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	port := d.target.Port()
+	if port == "" {
+		port = "80"
+		if d.target.Scheme == "https" {
+			port = "443"
+		}
+	}
+	addr := net.JoinHostPort(d.target.Hostname(), port)
+
+	res := map[string]any{"addr": addr}
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		res["reachable"] = false
+		res["error"] = err.Error()
+		return res
+	}
+	_ = conn.Close()
+	res["reachable"] = true
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.target.String(), nil)
+	if err == nil {
+		if resp, herr := http.DefaultClient.Do(req); herr == nil {
+			res["http_status"] = resp.StatusCode
+			_ = resp.Body.Close()
+		} else {
+			res["http_error"] = herr.Error()
+		}
+	}
+	return res
 }
