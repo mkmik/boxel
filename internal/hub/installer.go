@@ -76,7 +76,7 @@ var installerTmpl = template.Must(template.New("installer").Parse(`#!/usr/bin/en
 #
 # Overridable environment:
 #   BOXEL_HUB_URL          hub URL the agent dials      {{if .HubURL}}(default: {{.HubURL}}){{else}}(default: autodiscovered via reflection.int.exe.xyz){{end}}
-#   BOXEL_HUB_INTEGRATION  peer integration name to discover (default: boxel-hub)
+#   BOXEL_HUB_INTEGRATION  peer integration name to discover (default: boxel)
 #   BOXEL_AGENT_TOKEN      registration token           {{if .Token}}(embedded in this script){{else if .TokenRequired}}(REQUIRED: this copy was served unauthenticated){{else}}(not needed: the hub accepts exe.dev identity){{end}}
 #   BOXEL_AGENT_NAME       handle to register under     (default: short hostname; overridden by the platform-verified VM name on exe.dev)
 #   BOXEL_AGENT_TARGET     local URL to forward to      (default: http://127.0.0.1:8080)

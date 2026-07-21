@@ -98,7 +98,7 @@ WantedBy=timers.target
 func runSetup(args []string) error {
 	fs := flag.NewFlagSet("boxel-agent setup", flag.ExitOnError)
 	hubURL := fs.String("hub", os.Getenv("BOXEL_HUB_URL"), "hub base URL to configure (or BOXEL_HUB_URL); empty = autodiscover via exe.dev reflection")
-	hubIntegration := fs.String("hub-integration", os.Getenv("BOXEL_HUB_INTEGRATION"), "peer integration name for autodiscovery (or BOXEL_HUB_INTEGRATION; default boxel-hub)")
+	hubIntegration := fs.String("hub-integration", os.Getenv("BOXEL_HUB_INTEGRATION"), "peer integration name for autodiscovery (or BOXEL_HUB_INTEGRATION; default boxel)")
 	reflectionURL := fs.String("reflection-url", os.Getenv("BOXEL_REFLECTION_URL"), "reflection base URL for autodiscovery (or BOXEL_REFLECTION_URL; default https://reflection.int.exe.xyz)")
 	token := fs.String("token", os.Getenv("BOXEL_AGENT_TOKEN"), "registration bearer token (or BOXEL_AGENT_TOKEN); not needed with exe.dev identity registration")
 	name := fs.String("name", os.Getenv("BOXEL_AGENT_NAME"), "handle to register under (or BOXEL_AGENT_NAME; default: short hostname)")
@@ -184,7 +184,7 @@ func runSetup(args []string) error {
 // fails on an unreachable hub.
 func reportHubStatus(hubURL, integration, reflectionURL, name string) {
 	if integration == "" {
-		integration = "boxel-hub"
+		integration = "boxel"
 	}
 	if hubURL == "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

@@ -434,7 +434,7 @@ func TestReflectionDiscovery(t *testing.T) {
 		}
 		fmt.Fprintf(w, `{"integrations":[
 			{"name":"llm","type":"llm","help":"curl https://llm.int.exe.xyz/v1/models"},
-			{"name":"boxel-hub","type":"http-proxy","help":"curl %s/"}
+			{"name":"boxel","type":"http-proxy","help":"curl %s/"}
 		]}`, ts.URL)
 	}))
 	defer reflection.Close()
