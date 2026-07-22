@@ -17,7 +17,6 @@
 package idp
 
 import (
-	"crypto"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
@@ -126,11 +125,10 @@ func New(cfg Config) (*Server, error) {
 // Issuer returns the configured issuer URL.
 func (s *Server) Issuer() string { return s.cfg.Issuer }
 
-// Verifier returns a resource-side verifier bound to this IDP's key — for the
-// co-located deployment, where the same process serves both the IDP and the
-// protected /mcp endpoint.
+// Verifier returns the resource-side verifier bound to this IDP's key: the
+// same process serves both the IDP and the protected /mcp endpoint.
 func (s *Server) Verifier() *Verifier {
-	return NewLocalVerifier(s.cfg.Issuer, &s.cfg.Key.PublicKey, s.kid)
+	return &Verifier{issuer: s.cfg.Issuer, pub: &s.cfg.Key.PublicKey, kid: s.kid}
 }
 
 // AttachRoutes registers the IDP endpoints on mux. All of them are public by
@@ -504,8 +502,8 @@ func (s *Server) handleUserinfo(w http.ResponseWriter, r *http.Request) {
 // verifyOwn checks a JWT this IDP issued: our signature, our issuer, and the
 // expected token type.
 func (s *Server) verifyOwn(token, typ string) (claims, error) {
-	c, err := verifyJWT(token, func(kid, alg string) (crypto.PublicKey, error) {
-		if kid != s.kid || alg != "ES256" {
+	c, err := verifyJWT(token, func(kid string) (*ecdsa.PublicKey, error) {
+		if kid != s.kid {
 			return nil, fmt.Errorf("unknown key %q", kid)
 		}
 		return &s.cfg.Key.PublicKey, nil

@@ -67,13 +67,13 @@ func TestStreamableHandlerAcceptsForwardedPublicHost(t *testing.T) {
 }
 
 func TestAuthMiddlewareRefusesUnauthenticated(t *testing.T) {
-	if _, _, _, err := authLayers("", "", nil, nil); err == nil {
+	if _, _, _, err := authLayers("", "", nil); err == nil {
 		t.Fatal("expected error when no auth is configured")
 	}
 }
 
 func TestAuthMiddlewareBearerOnly(t *testing.T) {
-	wrap, ok, desc, err := authLayers("sekret", "", nil, nil)
+	wrap, ok, desc, err := authLayers("sekret", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestAuthMiddlewareBearerOnly(t *testing.T) {
 }
 
 func TestAuthMiddlewareExeIdentityOnly(t *testing.T) {
-	wrap, _, desc, err := authLayers("", "owner@example.com", nil, nil)
+	wrap, _, desc, err := authLayers("", "owner@example.com", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func newTestVerifier(t *testing.T, issuer string) (*idp.Verifier, func(email str
 	}
 	s, err := idp.New(idp.Config{
 		Issuer: issuer,
-		Users:  []string{"owner@example.com", "second@example.com"},
+		Users:  []string{"owner@example.com"},
 		Key:    key,
 		Logf:   t.Logf,
 	})
@@ -143,19 +143,12 @@ func newTestVerifier(t *testing.T, issuer string) (*idp.Verifier, func(email str
 	}
 	mux := http.NewServeMux()
 	s.AttachRoutes(mux)
-	mint := func(email string) string {
-		// Drive the real token machinery end to end is overkill here; sign
-		// through the userinfo-verifiable path instead by calling the IDP's
-		// verifier contract: mint via the exported surface only.
-		tok := mintAccessToken(t, s, mux, email)
-		return tok
-	}
-	return s.Verifier(), mint
+	return s.Verifier(), func(email string) string { return mintAccessToken(t, mux, email) }
 }
 
 // mintAccessToken runs the full register→authorize→token flow against the
 // IDP handlers in-process and returns the access token.
-func mintAccessToken(t *testing.T, s *idp.Server, mux *http.ServeMux, email string) string {
+func mintAccessToken(t *testing.T, mux *http.ServeMux, email string) string {
 	t.Helper()
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
@@ -231,7 +224,7 @@ func mintAccessToken(t *testing.T, s *idp.Server, mux *http.ServeMux, email stri
 
 func TestAuthMiddlewareOAuth(t *testing.T) {
 	v, mint := newTestVerifier(t, "https://idp.example")
-	wrap, ok, desc, err := authLayers("", "", v, nil)
+	wrap, ok, desc, err := authLayers("", "", v)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,24 +253,11 @@ func TestAuthMiddlewareOAuth(t *testing.T) {
 	if code := do(t, h, map[string]string{"Authorization": "Bearer garbage"}); code != http.StatusUnauthorized {
 		t.Errorf("garbage token: code %d, want 401", code)
 	}
-	// The oauth-users allowlist restricts accepted subjects.
-	wrapPin, _, _, err := authLayers("", "", v, []string{"Second@example.com"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	hp := wrapPin(okHandler())
-	if code := do(t, hp, map[string]string{"Authorization": "Bearer " + access}); code != http.StatusUnauthorized {
-		t.Errorf("owner token against second-only allowlist: code %d, want 401", code)
-	}
-	second := mint("second@example.com")
-	if code := do(t, hp, map[string]string{"Authorization": "Bearer " + second}); code != http.StatusOK {
-		t.Errorf("second token: code %d, want 200", code)
-	}
 }
 
 func TestAuthMiddlewareOAuthOrStatic(t *testing.T) {
 	v, mint := newTestVerifier(t, "https://idp.example")
-	wrap, _, desc, err := authLayers("sekret", "", v, nil)
+	wrap, _, desc, err := authLayers("sekret", "", v)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +310,7 @@ func TestResourceMetadataEndpoint(t *testing.T) {
 }
 
 func TestAuthMiddlewareBothLayers(t *testing.T) {
-	wrap, _, desc, err := authLayers("sekret", "owner@example.com", nil, nil)
+	wrap, _, desc, err := authLayers("sekret", "owner@example.com", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

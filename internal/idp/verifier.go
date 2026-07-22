@@ -1,57 +1,22 @@
 package idp
 
 // Verifier is the resource-server side: it authenticates an incoming HTTP
-// request by validating its Bearer JWT against the IDP's signing key — either
-// a local key (co-located IDP) or the issuer's published JWKS (remote IDP).
+// request by validating its Bearer JWT against the co-located IDP's signing
+// key.
 
 import (
-	"crypto"
 	"crypto/ecdsa"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
-	"time"
 )
 
-// Verifier validates access tokens from one issuer.
+// Verifier validates access tokens issued by the in-process IDP.
 type Verifier struct {
 	issuer string
-
-	// local, when set, verifies against this key without any fetching.
-	local    *ecdsa.PublicKey
-	localKid string
-
-	// Remote JWKS cache.
-	client    *http.Client
-	mu        sync.Mutex
-	keys      map[string]crypto.PublicKey
-	fetchedAt time.Time
-}
-
-// jwksMaxAge is how long a fetched JWKS is trusted before an unknown kid
-// triggers a refetch; jwksMinFetchInterval rate-limits refetches so a flood of
-// bogus tokens cannot hammer the issuer.
-const (
-	jwksMaxAge           = time.Hour
-	jwksMinFetchInterval = time.Minute
-)
-
-// NewLocalVerifier verifies tokens against an in-process signing key.
-func NewLocalVerifier(issuer string, pub *ecdsa.PublicKey, kid string) *Verifier {
-	return &Verifier{issuer: strings.TrimSuffix(issuer, "/"), local: pub, localKid: kid}
-}
-
-// NewRemoteVerifier verifies tokens against the JWKS discovered from the
-// issuer's metadata.
-func NewRemoteVerifier(issuer string) *Verifier {
-	return &Verifier{
-		issuer: strings.TrimSuffix(issuer, "/"),
-		client: &http.Client{Timeout: 10 * time.Second},
-		keys:   map[string]crypto.PublicKey{},
-	}
+	pub    *ecdsa.PublicKey
+	kid    string
 }
 
 // Issuer returns the issuer URL this verifier trusts.
@@ -66,7 +31,12 @@ func (v *Verifier) VerifyRequest(r *http.Request) (string, error) {
 	if !strings.HasPrefix(auth, prefix) {
 		return "", fmt.Errorf("no bearer token")
 	}
-	c, err := verifyJWT(strings.TrimPrefix(auth, prefix), v.keyFor)
+	c, err := verifyJWT(strings.TrimPrefix(auth, prefix), func(kid string) (*ecdsa.PublicKey, error) {
+		if kid != v.kid {
+			return nil, fmt.Errorf("unknown key %q", kid)
+		}
+		return v.pub, nil
+	})
 	if err != nil {
 		return "", err
 	}
@@ -122,78 +92,4 @@ func normalizeHost(h string) string {
 	h = strings.TrimSuffix(h, ":443")
 	h = strings.TrimSuffix(h, ":80")
 	return h
-}
-
-func (v *Verifier) keyFor(kid, alg string) (crypto.PublicKey, error) {
-	if v.local != nil {
-		if kid != v.localKid || alg != "ES256" {
-			return nil, fmt.Errorf("unknown key %q", kid)
-		}
-		return v.local, nil
-	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if key, ok := v.keys[kid]; ok && time.Since(v.fetchedAt) < jwksMaxAge {
-		return key, nil
-	}
-	// Unknown kid or stale cache: refetch, rate-limited.
-	if time.Since(v.fetchedAt) >= jwksMinFetchInterval {
-		keys, err := v.fetchJWKS()
-		if err != nil {
-			if key, ok := v.keys[kid]; ok {
-				return key, nil // fetch failed; fall back to the stale cache
-			}
-			return nil, fmt.Errorf("fetch issuer keys: %w", err)
-		}
-		v.keys, v.fetchedAt = keys, time.Now()
-	}
-	if key, ok := v.keys[kid]; ok {
-		return key, nil
-	}
-	return nil, fmt.Errorf("unknown key %q", kid)
-}
-
-// fetchJWKS discovers jwks_uri from the issuer's metadata (RFC 8414 with an
-// OIDC-discovery fallback) and fetches the key set. Called with v.mu held.
-func (v *Verifier) fetchJWKS() (map[string]crypto.PublicKey, error) {
-	var meta struct {
-		JWKSURI string `json:"jwks_uri"`
-	}
-	var lastErr error
-	for _, wk := range []string{"/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"} {
-		if lastErr = v.getJSON(v.issuer+wk, &meta); lastErr == nil && meta.JWKSURI != "" {
-			break
-		}
-	}
-	if meta.JWKSURI == "" {
-		return nil, fmt.Errorf("issuer metadata has no jwks_uri (last error: %v)", lastErr)
-	}
-	var set jwkSet
-	if err := v.getJSON(meta.JWKSURI, &set); err != nil {
-		return nil, err
-	}
-	keys := map[string]crypto.PublicKey{}
-	for _, k := range set.Keys {
-		pub, err := k.publicKey()
-		if err != nil {
-			continue // skip key types we don't support
-		}
-		keys[k.Kid] = pub
-	}
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("issuer JWKS contains no usable keys")
-	}
-	return keys, nil
-}
-
-func (v *Verifier) getJSON(u string, out any) error {
-	res, err := v.client.Get(u)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %s", u, res.Status)
-	}
-	return json.NewDecoder(res.Body).Decode(out)
 }

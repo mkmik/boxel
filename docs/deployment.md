@@ -155,9 +155,7 @@ tunnel-mcp --http 127.0.0.1:8080 --workspace /home/agent/work \
 
 ### Model C — the built-in OIDC IDP is the boundary (real OAuth for MCP connectors)
 
-Claude's remote-MCP connectors do full OAuth: authorization-server discovery (RFC 9728/8414), dynamic client registration (RFC 7591), the code flow with PKCE, refresh tokens. Nothing hosted by exe.dev provides that today — the platform's `https://exe.dev/.well-known/openid-configuration` is a workload-identity token stub (no authorize/token endpoints), and Bold's [`exe-oidc-proxy`](https://github.com/boldsoftware/exe-oidc-proxy) is a single-static-client OIDC shim without PKCE or dynamic registration. So tunnel-mcp ships the missing piece as a third role of the binary: a minimal OAuth 2.1 / OIDC provider that converts the edge's `X-ExeDev-Email` into signed tokens.
-
-Single-VM shape (IDP co-located with the MCP server, VM **public**):
+Claude's remote-MCP connectors do full OAuth: authorization-server discovery (RFC 9728/8414), dynamic client registration (RFC 7591), the code flow with PKCE, refresh tokens. Nothing hosted by exe.dev provides that today — the platform's `https://exe.dev/.well-known/openid-configuration` is a workload-identity token stub (no authorize/token endpoints), and Bold's [`exe-oidc-proxy`](https://github.com/boldsoftware/exe-oidc-proxy) is a single-static-client OIDC shim without PKCE or dynamic registration. So tunnel-mcp ships the missing piece in-process: `--idp-issuer` adds a minimal OAuth 2.1 / OIDC provider that converts the edge's `X-ExeDev-Email` into signed tokens, and `/mcp` accepts them. One process, one **public** VM:
 
 ```sh
 tunnel-mcp --http 127.0.0.1:8080 \
@@ -169,24 +167,13 @@ ssh exe.dev share port <vm> 8080
 ssh exe.dev share set-public <vm>
 ```
 
-Two-VM shape (dedicated IDP VM, both public):
+This composes with the pull-mode hub (add the `--hub-agent-*` flags to the same process): the auth guard covers `/vm/<name>/mcp` too, so one OAuth connector credential reaches the whole fleet through the hub origin.
 
-```sh
-# on the idp VM:
-tunnel-mcp --idp-only --http 127.0.0.1:8080 \
-  --idp-issuer https://idp.exe.xyz --idp-users you@example.com \
-  --idp-key-file /etc/tunnel-mcp/idp-key.pem
-# on the mcp VM:
-tunnel-mcp --http 127.0.0.1:8080 --workspace /home/agent/work \
-  --permissions /etc/tunnel-mcp/permissions.json \
-  --oauth-issuer https://idp.exe.xyz
-```
-
-Why **public**? The OAuth client's *backend* (e.g. Claude's servers) fetches the metadata, registers, and redeems codes at `/idp/token` with no exe.dev session — a private VM's edge would answer those with a login redirect. The design stays safe because those endpoints hand out nothing by themselves: every authorization code is minted only by `/idp/authorize`, which requires the edge-injected identity header (anonymous browsers are bounced through `/__exe.dev/login`), enforces the `--idp-users` allowlist, and shows a consent page. Codes are single-use and PKCE-bound; access tokens are short-lived ES256 JWTs carrying the resource audience; refresh tokens and client registrations are stateless signatures under `--idp-key-file`, so restarts don't strand connectors. Add `--oauth-users` on the resource side to pin accepted token subjects independently of the IDP's allowlist.
+Why **public**? The OAuth client's *backend* (e.g. Claude's servers) fetches the metadata, registers, and redeems codes at `/idp/token` with no exe.dev session — a private VM's edge would answer those with a login redirect. The design stays safe because those endpoints hand out nothing by themselves: every authorization code is minted only by `/idp/authorize`, which requires the edge-injected identity header (anonymous browsers are bounced through `/__exe.dev/login`), enforces the `--idp-users` allowlist, and shows a consent page. Codes are single-use and PKCE-bound; access tokens are short-lived ES256 JWTs carrying the resource audience; refresh tokens and client registrations are stateless signatures under `--idp-key-file`, so restarts don't strand connectors.
 
 ### Recommended: compose layers
 
-`--token` and `--owner-email` compose — supply both and a request must satisfy *both* the bearer check and the owner-identity check (bearer is checked first). Keeping the VM private (edge SSO) *and* requiring the bearer *and* pinning the owner means two independent failures are needed before any tool runs. `--oauth-issuer` is an *alternative* satisfying method alongside the static pair, for clients that authenticate with OAuth instead.
+`--token` and `--owner-email` compose — supply both and a request must satisfy *both* the bearer check and the owner-identity check (bearer is checked first). Keeping the VM private (edge SSO) *and* requiring the bearer *and* pinning the owner means two independent failures are needed before any tool runs. `--idp-issuer` OAuth tokens are an *alternative* satisfying method alongside the static pair, for clients that authenticate with OAuth instead.
 
 > Pick by client: a browser/desktop surface that can complete edge SSO → Model A (keep the VM private). A programmatic client with a pre-shared secret → Model B. An OAuth-capable MCP connector (Claude phone/web custom connectors) → Model C.
 

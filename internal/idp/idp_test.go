@@ -1,7 +1,6 @@
 package idp
 
 import (
-	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -418,40 +417,26 @@ func TestConsentDenyRedirectsWithError(t *testing.T) {
 	}
 }
 
-func TestRemoteVerifierFetchesJWKS(t *testing.T) {
-	_, ts := newTestIDP(t)
-	clientID := registerClient(t, ts, testRedirect)
-	code := authorizeAs(t, ts, clientID, "owner@example.com", nil)
-	res, tok := redeemCode(t, ts, clientID, code, testVerifier)
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("token: %d %v", res.StatusCode, tok)
-	}
-	access := tok["access_token"].(string)
+func TestVerifierRejectsForeignKey(t *testing.T) {
+	s, ts := newTestIDP(t)
+	v := s.Verifier()
 
-	v := NewRemoteVerifier(ts.URL)
-	req := httptest.NewRequest(http.MethodPost, "https://res.example/mcp", nil)
-	req.Header.Set("Authorization", "Bearer "+access)
-	email, err := v.VerifyRequest(req)
-	if err != nil {
-		t.Fatalf("remote verify: %v", err)
-	}
-	if email != "owner@example.com" {
-		t.Fatalf("email = %q", email)
-	}
-
-	// A token from a *different* key must be rejected.
+	// A well-formed access token signed by a *different* key must be
+	// rejected — even if it reuses the IDP's kid.
 	otherKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	forged, err := signJWT(otherKey, keyID(&otherKey.PublicKey), claims{
-		"iss": ts.URL, "typ": "access", "sub": "owner@example.com", "email": "owner@example.com",
-		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	freq := httptest.NewRequest(http.MethodPost, "https://res.example/mcp", nil)
-	freq.Header.Set("Authorization", "Bearer "+forged)
-	if _, err := v.VerifyRequest(freq); err == nil {
-		t.Fatal("forged token accepted")
+	for _, kid := range []string{keyID(&otherKey.PublicKey), keyID(&s.cfg.Key.PublicKey)} {
+		forged, err := signJWT(otherKey, kid, claims{
+			"iss": ts.URL, "typ": "access", "sub": "owner@example.com", "email": "owner@example.com",
+			"iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		freq := httptest.NewRequest(http.MethodPost, "https://res.example/mcp", nil)
+		freq.Header.Set("Authorization", "Bearer "+forged)
+		if _, err := v.VerifyRequest(freq); err == nil {
+			t.Fatalf("forged token (kid %s) accepted", kid)
+		}
 	}
 }
 
@@ -463,7 +448,7 @@ func TestJWTTamperRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	verify := func(s string) error {
-		_, err := verifyJWT(s, func(k, alg string) (crypto.PublicKey, error) { return &key.PublicKey, nil })
+		_, err := verifyJWT(s, func(kid string) (*ecdsa.PublicKey, error) { return &key.PublicKey, nil })
 		return err
 	}
 	if err := verify(tok); err != nil {

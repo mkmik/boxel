@@ -1,16 +1,12 @@
 package idp
 
-// Minimal JWS/JWT support: ES256 issuing and verification (the built-in IDP
-// signs everything with one P-256 key) plus RS256 verification (so the
-// resource-side Verifier can also point at a third-party issuer). Deliberately
-// dependency-free, like the rest of the module.
+// Minimal JWS/JWT support: ES256 only — the built-in IDP signs everything
+// with one P-256 key, and the co-located resource side verifies against that
+// same key. Deliberately dependency-free, like the rest of the module.
 
 import (
-	"crypto"
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -67,59 +63,19 @@ func (c claims) aud() []string {
 	return nil
 }
 
-// jwk is a JSON Web Key, covering the EC and RSA fields this package uses.
+// jwk is a JSON Web Key (serving only — the IDP never parses foreign keys).
 type jwk struct {
 	Kty string `json:"kty"`
-	Crv string `json:"crv,omitempty"`
-	X   string `json:"x,omitempty"`
-	Y   string `json:"y,omitempty"`
-	N   string `json:"n,omitempty"`
-	E   string `json:"e,omitempty"`
-	Kid string `json:"kid,omitempty"`
-	Alg string `json:"alg,omitempty"`
-	Use string `json:"use,omitempty"`
+	Crv string `json:"crv"`
+	X   string `json:"x"`
+	Y   string `json:"y"`
+	Kid string `json:"kid"`
+	Alg string `json:"alg"`
+	Use string `json:"use"`
 }
 
 type jwkSet struct {
 	Keys []jwk `json:"keys"`
-}
-
-// publicKey converts a JWK into a crypto.PublicKey.
-func (k jwk) publicKey() (crypto.PublicKey, error) {
-	switch k.Kty {
-	case "EC":
-		if k.Crv != "P-256" {
-			return nil, fmt.Errorf("unsupported EC curve %q", k.Crv)
-		}
-		xb, err := b64uDecode(k.X)
-		if err != nil {
-			return nil, fmt.Errorf("jwk x: %w", err)
-		}
-		yb, err := b64uDecode(k.Y)
-		if err != nil {
-			return nil, fmt.Errorf("jwk y: %w", err)
-		}
-		return &ecdsa.PublicKey{
-			Curve: elliptic.P256(),
-			X:     new(big.Int).SetBytes(xb),
-			Y:     new(big.Int).SetBytes(yb),
-		}, nil
-	case "RSA":
-		nb, err := b64uDecode(k.N)
-		if err != nil {
-			return nil, fmt.Errorf("jwk n: %w", err)
-		}
-		eb, err := b64uDecode(k.E)
-		if err != nil {
-			return nil, fmt.Errorf("jwk e: %w", err)
-		}
-		e := new(big.Int).SetBytes(eb)
-		if !e.IsInt64() || e.Int64() <= 0 || e.Int64() > 1<<31 {
-			return nil, fmt.Errorf("jwk: invalid RSA exponent")
-		}
-		return &rsa.PublicKey{N: new(big.Int).SetBytes(nb), E: int(e.Int64())}, nil
-	}
-	return nil, fmt.Errorf("unsupported jwk kty %q", k.Kty)
 }
 
 // ecJWK renders the public half of an ES256 signing key as a JWK.
@@ -164,9 +120,9 @@ func signJWT(key *ecdsa.PrivateKey, kid string, c claims) (string, error) {
 }
 
 // verifyJWT checks the signature and time validity of token. keyFor resolves
-// the verification key from the header's kid and alg; the alg is restricted to
-// ES256/RS256 (asymmetric only — "none" and HMAC are rejected by construction).
-func verifyJWT(token string, keyFor func(kid, alg string) (crypto.PublicKey, error)) (claims, error) {
+// the verification key from the header's kid; only ES256 is accepted ("none",
+// HMAC, and everything else are rejected by construction).
+func verifyJWT(token string, keyFor func(kid string) (*ecdsa.PublicKey, error)) (claims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return nil, fmt.Errorf("jwt: malformed token")
@@ -182,37 +138,22 @@ func verifyJWT(token string, keyFor func(kid, alg string) (crypto.PublicKey, err
 	if err := json.Unmarshal(hb, &header); err != nil {
 		return nil, fmt.Errorf("jwt: header: %w", err)
 	}
-	if header.Alg != "ES256" && header.Alg != "RS256" {
+	if header.Alg != "ES256" {
 		return nil, fmt.Errorf("jwt: unsupported alg %q", header.Alg)
 	}
-	key, err := keyFor(header.Kid, header.Alg)
+	pub, err := keyFor(header.Kid)
 	if err != nil {
 		return nil, err
 	}
 	sig, err := b64uDecode(parts[2])
-	if err != nil {
-		return nil, fmt.Errorf("jwt: signature: %w", err)
+	if err != nil || len(sig) != 64 {
+		return nil, fmt.Errorf("jwt: malformed signature")
 	}
 	sum := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	switch pub := key.(type) {
-	case *ecdsa.PublicKey:
-		if header.Alg != "ES256" || len(sig) != 64 {
-			return nil, fmt.Errorf("jwt: alg/key mismatch")
-		}
-		r := new(big.Int).SetBytes(sig[:32])
-		s := new(big.Int).SetBytes(sig[32:])
-		if !ecdsa.Verify(pub, sum[:], r, s) {
-			return nil, fmt.Errorf("jwt: invalid signature")
-		}
-	case *rsa.PublicKey:
-		if header.Alg != "RS256" {
-			return nil, fmt.Errorf("jwt: alg/key mismatch")
-		}
-		if err := rsa.VerifyPKCS1v15(pub, crypto.SHA256, sum[:], sig); err != nil {
-			return nil, fmt.Errorf("jwt: invalid signature")
-		}
-	default:
-		return nil, fmt.Errorf("jwt: unsupported key type %T", key)
+	r := new(big.Int).SetBytes(sig[:32])
+	s := new(big.Int).SetBytes(sig[32:])
+	if !ecdsa.Verify(pub, sum[:], r, s) {
+		return nil, fmt.Errorf("jwt: invalid signature")
 	}
 	pb, err := b64uDecode(parts[1])
 	if err != nil {

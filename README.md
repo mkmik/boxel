@@ -101,18 +101,15 @@ The MCP endpoint is `POST /mcp` (requires `Authorization: Bearer <token>`); `GET
 | `--token` / `--token-file` | `$BOXEL_TOKEN` | Static bearer token for HTTP (testing; front with OAuth for production). |
 | `--owner-email` | *(none)* | Pin to one owner via the exe.dev edge: require the `X-ExeDev-Email` header to equal this address. Composes with `--token`. See [`docs/deployment.md`](docs/deployment.md). |
 | `--session-ttl` | `24h` | Idle-session GC TTL (`0` disables). |
-| `--idp-issuer` | *(disabled)* | Enable the **built-in OIDC IDP** (see below): the external base URL clients see (e.g. `https://myvm.exe.xyz`). |
+| `--idp-issuer` | *(disabled)* | Enable the **built-in OIDC IDP** (see below) and accept its OAuth tokens on `/mcp`: the external base URL clients see (e.g. `https://myvm.exe.xyz`). |
 | `--idp-users` | `--owner-email` | Comma-separated emails allowed to authenticate at the IDP. |
 | `--idp-key-file` | *(ephemeral)* | P-256 signing key PEM, created on first run. Persist it in production. |
-| `--idp-only` | `false` | Serve **only** the IDP — the dedicated identity-provider VM role (no `/mcp`, no hub). |
-| `--oauth-issuer` | `--idp-issuer` | Accept OAuth bearer JWTs from this issuer on `/mcp` (alternative to `--token`/`--owner-email`). |
-| `--oauth-users` | *(any)* | Restrict accepted OAuth tokens to these emails. |
 | `--hub-agent-owner-email` | *(none)* | Enable the **pull-mode hub** (see below) with exe.dev identity registration: tokenless, names bound to the platform-verified caller VM. |
 | `--hub-agent-token` / `--hub-agent-token-file` | `$BOXEL_HUB_AGENT_TOKEN` | Enable the pull-mode hub with token registration (non-exe.dev deployments; composes with the above). |
 | `--hub-agent-listen` | *(disabled)* | Extra listener serving only the agent registration endpoint. |
 | `--hub-advertise-url` | *(reflection discovery / fetch URL)* | Base URL agents dial; embedded in the `/install-agent` script. |
 
-For HTTP, at least one of `--token` / `--owner-email` / `--oauth-issuer` must be set — the server refuses to listen unauthenticated.
+For HTTP, at least one of `--token` / `--owner-email` / `--idp-issuer` must be set — the server refuses to listen unauthenticated.
 
 ## OAuth for external tools: the built-in OIDC IDP
 
@@ -121,15 +118,16 @@ MCP clients — Claude's remote-MCP connectors, the phone app — speak **OAuth*
 they discover an authorization server, register a client, send the user
 through an authorize page, and then call `/mcp` with a bearer access token.
 exe.dev itself does not offer a user-facing OAuth/OIDC authorization server,
-so boxel ships one: a third role of the same binary, an intentionally small
-OAuth 2.1 / OIDC provider whose source of user truth is the **exe.dev edge**
-(`X-ExeDev-Email`). It supports dynamic client registration (RFC 7591), PKCE
-(S256, required), refresh tokens, and RFC 9728 protected-resource discovery —
-the pieces the MCP spec's auth flow needs. It never sees a password: the
-authorize endpoint bounces anonymous browsers through `/__exe.dev/login`,
-then gates on an email allowlist and a consent page.
+so boxel ships one: an intentionally small OAuth 2.1 / OIDC provider that
+runs **in the same process** as the MCP server (and hub, if enabled), whose
+source of user truth is the **exe.dev edge** (`X-ExeDev-Email`). It supports
+dynamic client registration (RFC 7591), PKCE (S256, required), refresh
+tokens, and RFC 9728 protected-resource discovery — the pieces the MCP
+spec's auth flow needs. It never sees a password: the authorize endpoint
+bounces anonymous browsers through `/__exe.dev/login`, then gates on an
+email allowlist and a consent page.
 
-Single public VM, IDP co-located with the MCP server:
+One public VM, one process:
 
 ```sh
 tunnel-mcp --http 127.0.0.1:8080 \
@@ -152,11 +150,11 @@ The VM must be **`set-public`**: token, registration, and metadata endpoints
 are called server-side by the OAuth client without an exe.dev session, and a
 private VM's edge would swallow them with a login redirect. Identity is still
 rooted in exe.dev because `/idp/authorize` is the only place codes come from,
-and it requires the edge-injected identity header. A dedicated IDP VM
-(`--idp-only`) with the MCP server elsewhere
-(`--oauth-issuer https://idp-vm.exe.xyz`) also works — see
-[`docs/deployment.md`](docs/deployment.md) §4b for both shapes and the
-threat model.
+and it requires the edge-injected identity header (still injected on public
+VMs for logged-in visitors). This composes with the pull-mode hub: enable
+`--idp-issuer` on the hub and one OAuth connector credential covers
+`/vm/<name>/mcp` for the whole fleet. See
+[`docs/deployment.md`](docs/deployment.md) §4b for the threat model.
 
 ## Pull mode: one hub, many non-routable VMs
 
@@ -331,7 +329,7 @@ Rules use Claude Code's `settings.json` format. Precedence is **deny > ask > all
 
 The generic `invoke` op is, by construction, an **authenticated RCE endpoint** — treat the whole design as "authenticated RCE with policy," not a typed API. **Authentication is the primary boundary; the permission engine is defense-in-depth and UX.** Deploy accordingly:
 
-- Front the HTTP transport with a TLS-terminating tunnel, and authenticate clients with OAuth — the built-in OIDC IDP (`--idp-issuer`), an external `--oauth-issuer`, or the fronting layer's SSO. The built-in bearer token is a second factor and a local-testing convenience, not the production auth story.
+- Front the HTTP transport with a TLS-terminating tunnel, and authenticate clients with OAuth — the built-in OIDC IDP (`--idp-issuer`) or the fronting layer's SSO. The built-in bearer token is a second factor and a local-testing convenience, not the production auth story.
 - Run the server as a dedicated **unprivileged** user, with the workspace on its own path and OS-level isolation (systemd sandboxing / bubblewrap / landlock).
 - Deny-by-default egress from the sandbox user (e.g. nftables per-UID) with a registry/GitHub allowlist, to bound exfiltration if a prompt-injected session goes rogue.
 - Every mutation is recorded in the audit log with an input digest and the permission decision; **file contents are never logged**, and Bash command lines flagged sensitive are redacted.

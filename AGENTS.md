@@ -18,9 +18,8 @@ entries that code changes have made obsolete.
 boxel is a **generic-operation MCP server** (`tunnel-mcp`) that tunnels the
 Claude Code tool-call protocol to a remote sandbox VM, plus a **pull-mode hub**
 that multiplexes MCP for a fleet of non-routable VMs, plus a **built-in OIDC
-IDP** (`internal/idp`, enabled with `--idp-issuer` / dedicated via
-`--idp-only`) that turns exe.dev edge identity into OAuth tokens for
-programmatic MCP connectors. The full design lives in
+IDP** (`internal/idp`, enabled in-process with `--idp-issuer`) that turns
+exe.dev edge identity into OAuth tokens for programmatic MCP connectors. The full design lives in
 `docs/prd-tunnel-mcp.md`; the README is the user-facing source of truth and is
 kept meticulously up to date — **update the README (and `docs/`) in the same PR
 as any behavior change**.
@@ -102,20 +101,22 @@ source: the binary version is **derived from embedded build info**
   `--owner-email` / `--hub-agent-owner-email`) and, through the peer
   integration, the unforgeable `X-Exedev-Source-Vm` — that's why hub agent
   registration is tokenless on exe.dev. `--token` and `--owner-email` compose
-  (both must pass when both are set); `--oauth-issuer` is an *alternative*
-  method, OR'd with the static pair in `authLayers`.
+  (both must pass when both are set); `--idp-issuer` OAuth tokens are an
+  *alternative* method, OR'd with the static pair in `authLayers`.
 - The edge injects identity on **public** VMs too (for logged-in visitors;
   anonymous requests just lack the headers), and `/__exe.dev/login?redirect=`
   forces a browser login — earlier docs wrongly claimed set-public disabled
   injection. exe.dev hosts **no user-facing OAuth/OIDC server** (its
   openid-configuration is a workload-identity stub; `exe-oidc-proxy` has no
   PKCE/DCR) — that's why the built-in IDP exists.
-- The IDP's non-authorize endpoints (`/idp/token`, `/idp/register`,
-  well-knowns, JWKS) are **public by design** and must never be wrapped in the
-  resource auth guard; the VM hosting the IDP must be `share set-public` or
-  OAuth clients' backends can't redeem codes. `/idp/authorize` is the only
-  identity-bearing endpoint. Everything issued is stateless off
-  `--idp-key-file` — losing that key strands every connector registration.
+- The IDP runs **in-process only** (it shares the signing key with the
+  resource-side `Verifier`; there is deliberately no remote-issuer mode). Its
+  non-authorize endpoints (`/idp/token`, `/idp/register`, well-knowns, JWKS)
+  are **public by design** and must never be wrapped in the resource auth
+  guard; the VM must be `share set-public` or OAuth clients' backends can't
+  redeem codes. `/idp/authorize` is the only identity-bearing endpoint.
+  Everything issued is stateless off `--idp-key-file` — losing that key
+  strands every connector registration.
 - Agents autodiscover the hub by querying the default `reflection` integration
   for an http-proxy integration named `boxel`. There is no VM-to-VM network on
   exe.dev; everything goes through `http://boxel.int.exe.xyz/`.
