@@ -38,6 +38,13 @@ connected, since when, and how many messages the mux proxied to it. The same
 data is available as JSON at `/agents`. Both endpoints sit behind the hub's
 client auth.
 
+Each in-process agent serves a dashboard of its own on `GET /`, rendered at
+`/vm/<name>/` through the hub: the agent's name and version, a link back to
+the hub it is connected to (kept current across autodiscovery), and its MCP
+endpoint. Forward mode deliberately does **not** claim `/` — it may front an
+arbitrary app — so its self-served diagnostic lives at
+`/vm/<name>/__boxel-agent` instead.
+
 ## Two ways to serve the agent side
 
 The diagram shows the default shape — the one the hub's `/install-agent`
