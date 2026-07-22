@@ -318,6 +318,19 @@ func TestWithGuardDefaultDeny(t *testing.T) {
 	}
 }
 
+func TestDefaultIDPIssuer(t *testing.T) {
+	issuer := defaultIDPIssuer()
+	if issuer == "" {
+		t.Skip("no hostname available")
+	}
+	if !strings.HasPrefix(issuer, "https://") || !strings.HasSuffix(issuer, ".exe.xyz") {
+		t.Errorf("defaultIDPIssuer() = %q, want https://<short-hostname>.exe.xyz", issuer)
+	}
+	if strings.Contains(strings.TrimSuffix(strings.TrimPrefix(issuer, "https://"), ".exe.xyz"), ".") {
+		t.Errorf("defaultIDPIssuer() = %q, hostname not shortened", issuer)
+	}
+}
+
 func TestResourceMetadataEndpoint(t *testing.T) {
 	mux := http.NewServeMux()
 	attachResourceMetadata(mux, "https://idp.example")

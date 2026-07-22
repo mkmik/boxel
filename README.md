@@ -101,9 +101,9 @@ The MCP endpoint is `POST /mcp` (requires `Authorization: Bearer <token>`); `GET
 | `--token` / `--token-file` | `$BOXEL_TOKEN` | Static bearer token for HTTP (testing; front with OAuth for production). |
 | `--owner-email` | *(none)* | Pin to one owner via the exe.dev edge: require the `X-ExeDev-Email` header to equal this address. Composes with `--token`. See [`docs/deployment.md`](docs/deployment.md). |
 | `--session-ttl` | `24h` | Idle-session GC TTL (`0` disables). |
-| `--idp-issuer` | *(disabled)* | Enable the **built-in OIDC IDP** (see below) and accept its OAuth tokens on `/mcp`: the external base URL clients see (e.g. `https://myvm.exe.xyz`). |
+| `--idp-issuer` | *(auto)* | Enable the **built-in OIDC IDP** (see below) and accept its OAuth tokens on `/mcp`: the external base URL clients see. **Auto-enabled** as `https://<hostname>.exe.xyz` when `--owner-email` is the sole configured auth; `none` disables. |
 | `--idp-users` | `--owner-email` | Comma-separated emails allowed to authenticate at the IDP. |
-| `--idp-key-file` | *(ephemeral)* | P-256 signing key PEM, created on first run. Persist it in production. |
+| `--idp-key-file` | `~/.config/boxel/idp-key.pem` | P-256 signing key PEM, created on first run. |
 | `--hub-agent-owner-email` | *(none)* | Enable the **pull-mode hub** (see below) with exe.dev identity registration: tokenless, names bound to the platform-verified caller VM. |
 | `--hub-agent-token` / `--hub-agent-token-file` | `$BOXEL_HUB_AGENT_TOKEN` | Enable the pull-mode hub with token registration (non-exe.dev deployments; composes with the above). |
 | `--hub-agent-listen` | *(disabled)* | Extra listener serving only the agent registration endpoint. |
@@ -127,14 +127,21 @@ spec's auth flow needs. It never sees a password: the authorize endpoint
 bounces anonymous browsers through `/__exe.dev/login`, then gates on an
 email allowlist and a consent page.
 
-One public VM, one process:
+**Zero flags for the common case:** on a deployment whose only auth is
+`--owner-email` (the recommended exe.dev shape, including the hub runbook
+below), the IDP **auto-enables** with issuer `https://<hostname>.exe.xyz`,
+allowlist `--owner-email`, and a signing key persisted at
+`~/.config/boxel/idp-key.pem` — so updating the binary and running
+`ssh exe.dev share set-public <vm>` is all it takes to accept OAuth
+connectors. Auto-enable is deliberately skipped when a `--token` is also
+configured (there the static pair means token *and* identity, and OAuth
+would weaken it to identity alone); pass `--idp-issuer` explicitly to opt
+in, or `--idp-issuer none` to opt out. One public VM, one process:
 
 ```sh
 tunnel-mcp --http 127.0.0.1:8080 \
   --workspace /home/agent/work --permissions /etc/tunnel-mcp/permissions.json \
-  --idp-issuer https://myvm.exe.xyz \
-  --idp-users you@example.com \
-  --idp-key-file /etc/tunnel-mcp/idp-key.pem
+  --owner-email you@example.com          # IDP auto-enables from this
 ssh exe.dev share port myvm 8080
 ssh exe.dev share set-public myvm
 ```

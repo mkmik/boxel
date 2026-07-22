@@ -102,9 +102,9 @@ func main() {
 	flag.StringVar(&o.hubTokenFile, "hub-token-file", os.Getenv("BOXEL_AGENT_TOKEN_FILE"), "with --hub-connect: read the registration token from this file")
 	flag.StringVar(&o.hubIntegration, "hub-integration", os.Getenv("BOXEL_HUB_INTEGRATION"), "with --hub-connect: hub peer-integration name to autodiscover via reflection (default boxel)")
 	flag.StringVar(&o.reflectionURL, "hub-reflection-url", os.Getenv("BOXEL_REFLECTION_URL"), "with --hub-connect: exe.dev reflection base URL for autodiscovery (default https://reflection.int.exe.xyz)")
-	flag.StringVar(&o.idpIssuer, "idp-issuer", "", "enable the built-in OIDC IDP and accept its OAuth bearer tokens on /mcp (an alternative to --token/--owner-email): the external base URL of this deployment as OAuth clients see it (e.g. https://myvm.exe.xyz). Serves the OAuth/OIDC well-knowns plus "+idp.AuthorizePath+", "+idp.TokenPath+", "+idp.RegisterPath+"; the authorize endpoint trusts the exe.dev edge identity header. See docs/deployment.md §4b.")
+	flag.StringVar(&o.idpIssuer, "idp-issuer", "", "enable the built-in OIDC IDP and accept its OAuth bearer tokens on /mcp (an alternative to --token/--owner-email): the external base URL of this deployment as OAuth clients see it (e.g. https://myvm.exe.xyz). Auto-enabled as https://<hostname>.exe.xyz when --owner-email is the sole configured auth; pass 'none' to disable. Serves the OAuth/OIDC well-knowns plus "+idp.AuthorizePath+", "+idp.TokenPath+", "+idp.RegisterPath+"; the authorize endpoint trusts the exe.dev edge identity header. See docs/deployment.md §4b.")
 	flag.StringVar(&o.idpUsers, "idp-users", "", "comma-separated emails allowed to authenticate at the built-in IDP (default: --owner-email)")
-	flag.StringVar(&o.idpKeyFile, "idp-key-file", "", "path to the IDP's P-256 signing key PEM, created on first run if missing; empty = ephemeral key (a restart invalidates every token and registered client — testing only)")
+	flag.StringVar(&o.idpKeyFile, "idp-key-file", "", "path to the IDP's P-256 signing key PEM, created on first run if missing (default: <user config dir>/boxel/idp-key.pem)")
 	flag.Parse()
 
 	if err := run(o); err != nil {
@@ -184,6 +184,10 @@ func run(o opts) error {
 		return err
 	}
 	hubEnabled := hubToken != "" || o.hubAgentOwnerEmail != ""
+	idpDisabled := strings.EqualFold(o.idpIssuer, "none")
+	if idpDisabled {
+		o.idpIssuer = ""
+	}
 	if o.idpIssuer != "" && o.httpAddr == "" {
 		return fmt.Errorf("the built-in IDP requires the HTTP transport: pass --http")
 	}
@@ -215,6 +219,22 @@ func run(o opts) error {
 	bearer, err := resolveToken(o.token, o.tokenFile)
 	if err != nil {
 		return err
+	}
+	// Zero-config default: when exe.dev edge identity is the sole configured
+	// client auth (--owner-email, no static bearer), enable the IDP
+	// automatically under this VM's exe.dev hostname — an existing
+	// deployment picks up OAuth on update, with no flag changes, and can be
+	// `share set-public` for OAuth connectors. This adds no trust the
+	// deployment hasn't already assumed: anyone who could defeat the edge
+	// identity header would already satisfy --owner-email directly. It is
+	// deliberately NOT done when a bearer token is configured — there the
+	// static pair requires token AND identity, and OAuth would weaken it to
+	// identity alone.
+	if !idpDisabled && o.idpIssuer == "" && o.ownerEmail != "" && bearer == "" {
+		if issuer := defaultIDPIssuer(); issuer != "" {
+			o.idpIssuer = issuer
+			log.Printf("idp: auto-enabled with issuer %s (--owner-email is the sole auth; set --idp-issuer to override, or --idp-issuer none to disable)", issuer)
+		}
 	}
 	// The same process is both the OIDC issuer and the protected MCP
 	// resource: enabling the IDP makes /mcp accept its tokens.
@@ -499,14 +519,39 @@ func buildIDP(o opts) (*idp.Server, error) {
 	if len(users) == 0 {
 		return nil, fmt.Errorf("the built-in IDP requires an allowlist: pass --idp-users (or --owner-email)")
 	}
-	key, err := idp.LoadOrCreateKey(o.idpKeyFile)
+	keyFile := o.idpKeyFile
+	if keyFile == "" {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return nil, fmt.Errorf("cannot locate the default --idp-key-file directory: %w", err)
+		}
+		if err := os.MkdirAll(filepath.Join(dir, "boxel"), 0o700); err != nil {
+			return nil, fmt.Errorf("create idp key directory: %w", err)
+		}
+		keyFile = filepath.Join(dir, "boxel", "idp-key.pem")
+	}
+	key, err := idp.LoadOrCreateKey(keyFile)
 	if err != nil {
 		return nil, err
 	}
-	if o.idpKeyFile == "" {
-		log.Printf("idp: WARNING: no --idp-key-file; using an ephemeral signing key — a restart invalidates every token and registered client")
-	}
+	log.Printf("idp: signing key %s", keyFile)
 	return idp.New(idp.Config{Issuer: o.idpIssuer, Users: users, Key: key})
+}
+
+// defaultIDPIssuer derives the issuer for IDP auto-enablement: this VM's
+// public URL under the exe.dev proxy naming convention (short hostname ==
+// VM name, the same convention pull-mode agents register under).
+func defaultIDPIssuer() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	short, _, _ := strings.Cut(h, ".")
+	short = strings.ToLower(short)
+	if short == "" {
+		return ""
+	}
+	return "https://" + short + ".exe.xyz"
 }
 
 // splitEmails parses a comma-separated email list, dropping empties.

@@ -114,6 +114,12 @@ source: the binary version is **derived from embedded build info**
   `isPublicPath` allowlist (OAuth well-knowns, self-authorizing `/idp/*`,
   `/healthz`, hub connect/installer) bypasses auth. Never re-introduce
   per-route guard wrapping — a forgotten wrap is an exposed route.
+- The IDP **auto-enables** when `--owner-email` is the sole configured auth
+  (issuer `https://<short-hostname>.exe.xyz`, key at
+  `~/.config/boxel/idp-key.pem`) so fleet auto-updates light it up without
+  flag changes. It deliberately does NOT auto-enable when a `--token` is set:
+  OAuth is an alternative method, and auto-adding it would weaken a
+  token+identity deployment to identity alone. `--idp-issuer none` opts out.
 - The IDP runs **in-process only** (it shares the signing key with the
   resource-side `Verifier`; there is deliberately no remote-issuer mode). Its
   non-authorize endpoints (`/idp/token`, `/idp/register`, well-knowns, JWKS)

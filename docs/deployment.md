@@ -155,15 +155,12 @@ tunnel-mcp --http 127.0.0.1:8080 --workspace /home/agent/work \
 
 ### Model C — the built-in OIDC IDP is the boundary (real OAuth for MCP connectors)
 
-Claude's remote-MCP connectors do full OAuth: authorization-server discovery (RFC 9728/8414), dynamic client registration (RFC 7591), the code flow with PKCE, refresh tokens. Nothing hosted by exe.dev provides that today — the platform's `https://exe.dev/.well-known/openid-configuration` is a workload-identity token stub (no authorize/token endpoints), and Bold's [`exe-oidc-proxy`](https://github.com/boldsoftware/exe-oidc-proxy) is a single-static-client OIDC shim without PKCE or dynamic registration. So tunnel-mcp ships the missing piece in-process: `--idp-issuer` adds a minimal OAuth 2.1 / OIDC provider that converts the edge's `X-ExeDev-Email` into signed tokens, and `/mcp` accepts them. One process, one **public** VM:
+Claude's remote-MCP connectors do full OAuth: authorization-server discovery (RFC 9728/8414), dynamic client registration (RFC 7591), the code flow with PKCE, refresh tokens. Nothing hosted by exe.dev provides that today — the platform's `https://exe.dev/.well-known/openid-configuration` is a workload-identity token stub (no authorize/token endpoints), and Bold's [`exe-oidc-proxy`](https://github.com/boldsoftware/exe-oidc-proxy) is a single-static-client OIDC shim without PKCE or dynamic registration. So tunnel-mcp ships the missing piece in-process: a minimal OAuth 2.1 / OIDC provider that converts the edge's `X-ExeDev-Email` into signed tokens, and `/mcp` accepts them. It **auto-enables** whenever `--owner-email` is the sole configured auth (issuer `https://<hostname>.exe.xyz`, allowlist `--owner-email`, key persisted at `~/.config/boxel/idp-key.pem`), so an existing Model A deployment needs **no flag changes** — update the binary, then make the VM public. `--idp-issuer` overrides the derived issuer (or `none` disables); auto-enable is skipped when a `--token` is configured, because OAuth-as-alternative would weaken the token+identity pair to identity alone. One process, one **public** VM:
 
 ```sh
 tunnel-mcp --http 127.0.0.1:8080 \
   --workspace /home/agent/work --permissions /etc/tunnel-mcp/permissions.json \
-  --owner-email you@example.com \
-  --idp-issuer https://<vm>.exe.xyz \
-  --idp-users you@example.com \
-  --idp-key-file /etc/tunnel-mcp/idp-key.pem
+  --owner-email you@example.com          # IDP auto-enables from this
 ssh exe.dev share port <vm> 8080
 ssh exe.dev share set-public <vm>
 ```
