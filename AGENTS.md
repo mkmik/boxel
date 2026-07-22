@@ -114,6 +114,11 @@ source: the binary version is **derived from embedded build info**
   `isPublicPath` allowlist (OAuth well-knowns, self-authorizing `/idp/*`,
   `/healthz`, hub connect/installer) bypasses auth. Never re-introduce
   per-route guard wrapping — a forgotten wrap is an exposed route.
+- Guard rejections are content-negotiated: browser navigations (GET/HEAD with
+  `Accept: text/html`) that fail the exe.dev identity check get an HTML
+  sign-in page bouncing through `/__exe.dev/login?redirect=` (or a sign-out
+  button when the wrong account is signed in); everything else keeps the
+  plain-text 401/403 so API clients see unambiguous errors.
 - The IDP **auto-enables** when `--owner-email` is the sole configured auth
   (issuer `https://<short-hostname>.exe.xyz`, key at
   `~/.config/boxel/idp-key.pem`) so fleet auto-updates light it up without

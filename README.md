@@ -109,7 +109,7 @@ The MCP endpoint is `POST /mcp` (requires `Authorization: Bearer <token>`); `GET
 | `--hub-agent-listen` | *(disabled)* | Extra listener serving only the agent registration endpoint. |
 | `--hub-advertise-url` | *(reflection discovery / fetch URL)* | Base URL agents dial; embedded in the `/install-agent` script. |
 
-For HTTP, at least one of `--token` / `--owner-email` / `--idp-issuer` must be set — the server refuses to listen unauthenticated. The guard is **default-deny**: every route (`/mcp`, the hub dashboard, `/vm/…`, `/agents`, even unknown paths) requires auth, except a closed allowlist of endpoints the OAuth spec needs open (`/.well-known/*`, the self-authorizing `/idp/*` flow endpoints) plus `/healthz` and the hub's self-authenticating registration/installer endpoints.
+For HTTP, at least one of `--token` / `--owner-email` / `--idp-issuer` must be set — the server refuses to listen unauthenticated. The guard is **default-deny**: every route (`/mcp`, the hub dashboard, `/vm/…`, `/agents`, even unknown paths) requires auth, except a closed allowlist of endpoints the OAuth spec needs open (`/.well-known/*`, the self-authorizing `/idp/*` flow endpoints) plus `/healthz` and the hub's self-authenticating registration/installer endpoints. When a browser hits a guarded page without an exe.dev identity (e.g. right after signing out of the dashboard), the guard serves a sign-in page that bounces through the platform login and returns to the same URL; API clients get the plain 401/403.
 
 ## OAuth for external tools: the built-in OIDC IDP
 
