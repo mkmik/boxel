@@ -121,7 +121,7 @@ Optionally front it with **Cloudflare Access** for a second, identity-aware auth
 An [exe.dev](https://exe.dev) box already provides the "VM behind a TLS tunnel" shape, so you can skip Cloudflare entirely. The exe.dev edge at `https://<vm>.exe.xyz/` terminates TLS and forwards to a port on the VM, and — critically — it is an **identity gate**:
 
 - **Private by default:** only users with access to the VM can reach the proxy; a first request is redirected to log into exe.dev (OIDC). `ssh exe.dev share set-public <vm>` opens it to the internet; `set-private` reverts.
-- On authenticated requests, the edge injects `X-ExeDev-UserID` and `X-ExeDev-Email` headers (overwriting any client-supplied copy).
+- On authenticated requests, the edge injects `X-ExeDev-UserID` and `X-ExeDev-Email` headers (overwriting any client-supplied copy). This holds on **public** VMs too: logged-in visitors still get the headers; anonymous requests simply arrive without them, and an app can bounce a browser through `/__exe.dev/login?redirect=<path>` to force a login.
 - The forwarded port defaults to the lowest `EXPOSE`d TCP port; set it explicitly with `ssh exe.dev share port <vm> 8080`.
 
 ### Model A — edge identity is the auth boundary (best for desktop / browser MCP)
@@ -139,7 +139,7 @@ ssh exe.dev share port <vm> 8080
 
 `--owner-email` makes `/mcp` require the exe.dev identity header to equal your address: a missing header is `401` (the request didn't come through the authenticating edge), a different authenticated user is `403`.
 
-**Safety rule:** bind `--http` to `127.0.0.1` so the exe.dev edge is the *only* path to tunnel-mcp. The header is trustworthy only because the edge overwrites it; if the process were reachable directly, a client could spoof `X-ExeDev-Email`. Do **not** rely on `--owner-email` alone once the VM is `set-public` (the edge no longer injects identity there) — add `--token` for that case.
+**Safety rule:** bind `--http` to `127.0.0.1` so the exe.dev edge is the *only* path to tunnel-mcp. The header is trustworthy only because the edge overwrites it; if the process were reachable directly, a client could spoof `X-ExeDev-Email`. On a `set-public` VM the edge still injects identity for logged-in users (and strips it from anonymous requests), so `--owner-email` fails closed there too — but keeping the VM private, or adding `--token`, stays the safer posture for a browser-only deployment.
 
 ### Model B — bearer token is the boundary (needed for the phone app)
 
@@ -153,11 +153,42 @@ tunnel-mcp --http 127.0.0.1:8080 --workspace /home/agent/work \
   --permissions /etc/tunnel-mcp/permissions.json --token-file /etc/tunnel-mcp/token
 ```
 
-### Recommended: both layers
+### Model C — the built-in OIDC IDP is the boundary (real OAuth for MCP connectors)
 
-`--token` and `--owner-email` compose — supply both and a request must satisfy *both* the bearer check and the owner-identity check (bearer is checked first). Keeping the VM private (edge SSO) *and* requiring the bearer *and* pinning the owner means two independent failures are needed before any tool runs.
+Claude's remote-MCP connectors do full OAuth: authorization-server discovery (RFC 9728/8414), dynamic client registration (RFC 7591), the code flow with PKCE, refresh tokens. Nothing hosted by exe.dev provides that today — the platform's `https://exe.dev/.well-known/openid-configuration` is a workload-identity token stub (no authorize/token endpoints), and Bold's [`exe-oidc-proxy`](https://github.com/boldsoftware/exe-oidc-proxy) is a single-static-client OIDC shim without PKCE or dynamic registration. So tunnel-mcp ships the missing piece as a third role of the binary: a minimal OAuth 2.1 / OIDC provider that converts the edge's `X-ExeDev-Email` into signed tokens.
 
-> Verify first whether your Claude surface's MCP connector can authenticate to a **private** exe.dev box (via `exe-oidc-proxy` or an OAuth flow it supports). If yes, keep it private (Model A). If no — as with the phone app today — use `set-public` + bearer (Model B).
+Single-VM shape (IDP co-located with the MCP server, VM **public**):
+
+```sh
+tunnel-mcp --http 127.0.0.1:8080 \
+  --workspace /home/agent/work --permissions /etc/tunnel-mcp/permissions.json \
+  --idp-issuer https://<vm>.exe.xyz \
+  --idp-users you@example.com \
+  --idp-key-file /etc/tunnel-mcp/idp-key.pem
+ssh exe.dev share port <vm> 8080
+ssh exe.dev share set-public <vm>
+```
+
+Two-VM shape (dedicated IDP VM, both public):
+
+```sh
+# on the idp VM:
+tunnel-mcp --idp-only --http 127.0.0.1:8080 \
+  --idp-issuer https://idp.exe.xyz --idp-users you@example.com \
+  --idp-key-file /etc/tunnel-mcp/idp-key.pem
+# on the mcp VM:
+tunnel-mcp --http 127.0.0.1:8080 --workspace /home/agent/work \
+  --permissions /etc/tunnel-mcp/permissions.json \
+  --oauth-issuer https://idp.exe.xyz
+```
+
+Why **public**? The OAuth client's *backend* (e.g. Claude's servers) fetches the metadata, registers, and redeems codes at `/idp/token` with no exe.dev session — a private VM's edge would answer those with a login redirect. The design stays safe because those endpoints hand out nothing by themselves: every authorization code is minted only by `/idp/authorize`, which requires the edge-injected identity header (anonymous browsers are bounced through `/__exe.dev/login`), enforces the `--idp-users` allowlist, and shows a consent page. Codes are single-use and PKCE-bound; access tokens are short-lived ES256 JWTs carrying the resource audience; refresh tokens and client registrations are stateless signatures under `--idp-key-file`, so restarts don't strand connectors. Add `--oauth-users` on the resource side to pin accepted token subjects independently of the IDP's allowlist.
+
+### Recommended: compose layers
+
+`--token` and `--owner-email` compose — supply both and a request must satisfy *both* the bearer check and the owner-identity check (bearer is checked first). Keeping the VM private (edge SSO) *and* requiring the bearer *and* pinning the owner means two independent failures are needed before any tool runs. `--oauth-issuer` is an *alternative* satisfying method alongside the static pair, for clients that authenticate with OAuth instead.
+
+> Pick by client: a browser/desktop surface that can complete edge SSO → Model A (keep the VM private). A programmatic client with a pre-shared secret → Model B. An OAuth-capable MCP connector (Claude phone/web custom connectors) → Model C.
 
 ## 5. Egress hardening (recommended)
 
