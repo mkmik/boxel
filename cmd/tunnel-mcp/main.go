@@ -22,8 +22,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -408,6 +410,14 @@ func resolveToken(token, tokenFile string) (string, error) {
 // (bind --http to localhost). See docs/deployment.md.
 const exeEmailHeader = "X-ExeDev-Email"
 
+// exeLoginPath / exeLogoutPath are the platform session endpoints available
+// on every exe.dev VM domain; login takes redirect={path} and returns the
+// browser with the identity header attached.
+const (
+	exeLoginPath  = "/__exe.dev/login"
+	exeLogoutPath = "/__exe.dev/logout"
+)
+
 // authLayers builds the configured HTTP auth: a middleware that wraps a
 // handler with the enforcing layers, and a boolean predicate over a request
 // (used to decide whether the hub installer may embed the agent token).
@@ -481,8 +491,16 @@ func authLayers(bearer, ownerEmail string, oauth *idp.Verifier) (wrap func(http.
 			case bearer != "" && !bearerOK(r, bearer):
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 			case ownerEmail != "" && strings.TrimSpace(r.Header.Get(exeEmailHeader)) == "":
+				if browserNavigation(r) {
+					serveSignInPage(w, r, "", http.StatusUnauthorized)
+					return
+				}
 				http.Error(w, "unauthorized: missing exe.dev identity", http.StatusUnauthorized)
 			case ownerEmail != "":
+				if browserNavigation(r) {
+					serveSignInPage(w, r, strings.TrimSpace(r.Header.Get(exeEmailHeader)), http.StatusForbidden)
+					return
+				}
 				http.Error(w, "forbidden: not the authorized owner", http.StatusForbidden)
 			default:
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -503,6 +521,60 @@ func exeIdentityOK(r *http.Request, ownerEmail string) bool {
 	want := strings.ToLower(strings.TrimSpace(ownerEmail))
 	got := strings.ToLower(strings.TrimSpace(r.Header.Get(exeEmailHeader)))
 	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+// browserNavigation reports whether the request looks like a human driving a
+// browser rather than an MCP/API client: a safe method asking for an HTML
+// answer. MCP clients send Accept: application/json, text/event-stream and
+// never match.
+func browserNavigation(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+var signInTmpl = template.Must(template.New("signin").Parse(`<!doctype html>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>boxel — sign in</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;color:#222}
+.card{border:1px solid #ddd;border-radius:8px;padding:1.5rem}
+a.button{display:inline-block;margin-top:1rem;font-size:1rem;padding:.5rem 1.5rem;border-radius:6px;background:#1a7f37;color:#fff;text-decoration:none}
+form{margin-top:1rem}
+button{font-size:1rem;padding:.5rem 1.5rem;border-radius:6px;border:1px solid #888;cursor:pointer;background:transparent}
+</style>
+<div class="card">
+{{if .Email}}
+<h1>Not authorized</h1>
+<p>You are signed in as <strong>{{.Email}}</strong>, which is not the authorized owner of this boxel deployment.</p>
+<form method="post" action="{{.LogoutPath}}"><button type="submit">Sign out</button></form>
+{{else}}
+<h1>Sign in required</h1>
+<p>This boxel deployment is limited to its owner. Sign in with your exe.dev account to continue.</p>
+<a class="button" href="{{.LoginURL}}">Sign in with exe.dev</a>
+{{end}}
+</div>
+`))
+
+// serveSignInPage answers a browser that failed the exe.dev identity check
+// with an HTML page instead of a bare status line: no identity (e.g. right
+// after signing out) gets a button into the platform login bounce, which
+// returns to the same URL with the identity header attached; the wrong
+// identity gets a sign-out button so the user can switch accounts.
+func serveSignInPage(w http.ResponseWriter, r *http.Request, email string, status int) {
+	target := r.URL.RequestURI()
+	if !strings.HasPrefix(target, "/") || strings.HasPrefix(target, "//") {
+		target = "/" // absolute-form or protocol-relative URIs never reach the login bounce
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = signInTmpl.Execute(w, map[string]string{
+		"Email":      email,
+		"LoginURL":   exeLoginPath + "?redirect=" + url.QueryEscape(target),
+		"LogoutPath": exeLogoutPath,
+	})
 }
 
 // buildIDP constructs the built-in IDP from the flags. The allowlist falls

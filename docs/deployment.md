@@ -137,7 +137,7 @@ tunnel-mcp \
 ssh exe.dev share port <vm> 8080
 ```
 
-`--owner-email` makes `/mcp` require the exe.dev identity header to equal your address: a missing header is `401` (the request didn't come through the authenticating edge), a different authenticated user is `403`.
+`--owner-email` makes `/mcp` require the exe.dev identity header to equal your address: a missing header is `401` (the request didn't come through the authenticating edge), a different authenticated user is `403`. API clients get those as plain-text errors; a browser navigation (e.g. revisiting the hub dashboard after signing out) instead gets an HTML page with a **Sign in** button through the platform login bounce (`/__exe.dev/login?redirect=…`), which returns to the same URL with identity attached — or, when signed in as the wrong account, a sign-out button to switch.
 
 **Safety rule:** bind `--http` to `127.0.0.1` so the exe.dev edge is the *only* path to tunnel-mcp. The header is trustworthy only because the edge overwrites it; if the process were reachable directly, a client could spoof `X-ExeDev-Email`. On a `set-public` VM the edge still injects identity for logged-in users (and strips it from anonymous requests), so `--owner-email` fails closed there too — but keeping the VM private, or adding `--token`, stays the safer posture for a browser-only deployment.
 

@@ -124,6 +124,59 @@ func TestAuthMiddlewareExeIdentityOnly(t *testing.T) {
 	}
 }
 
+// A human whose exe.dev session ended (e.g. just signed out of the dashboard)
+// must get a way back in, not a bare status line: browser navigations that
+// fail the identity check receive an HTML page with a sign-in button through
+// the platform login bounce (or a sign-out button when signed in as the wrong
+// account). Non-browser clients keep the plain-text errors.
+func TestAuthMiddlewareBrowserSignInPage(t *testing.T) {
+	wrap, _, _, err := authLayers("", "owner@example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := wrap(okHandler())
+	get := func(target string, headers map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Anonymous browser → 401 HTML linking to the login bounce, which returns
+	// to the URL that was denied.
+	rec := get("/vm/box/", map[string]string{"Accept": "text/html,application/xhtml+xml"})
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("anonymous browser: code %d, want 401", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("anonymous browser: Content-Type %q, want text/html", ct)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, exeLoginPath+"?redirect=%2Fvm%2Fbox%2F") {
+		t.Errorf("anonymous browser: body lacks login link with redirect, got %q", body)
+	}
+
+	// Wrong signed-in account → 403 HTML with a sign-out button.
+	rec = get("/", map[string]string{"Accept": "text/html", exeEmailHeader: "intruder@example.com"})
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("wrong account browser: code %d, want 403", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, exeLogoutPath) || !strings.Contains(body, "intruder@example.com") {
+		t.Errorf("wrong account browser: body lacks sign-out form or account, got %q", body)
+	}
+
+	// A GET that doesn't ask for HTML (API client) keeps the plain-text 401.
+	rec = get("/agents", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("api client: code %d, want 401", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); strings.Contains(ct, "text/html") {
+		t.Errorf("api client: got an HTML answer, want plain text")
+	}
+}
+
 // newTestVerifier returns a Verifier plus a mint function producing access
 // tokens signed by the matching key.
 func newTestVerifier(t *testing.T, issuer string) (*idp.Verifier, func(email string) string) {
