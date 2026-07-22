@@ -3,6 +3,16 @@
 Instructions for coding agents working on this repo. These capture decisions
 made in earlier sessions — follow them instead of re-deriving them.
 
+## Keep this file current
+
+**Update AGENTS.md in the same PR whenever you learn something worth passing
+on** — typically anything you didn't get right on the first try: a build/test
+quirk, a non-obvious invariant, a wrong assumption this file (or its absence)
+led you into, a deployment gotcha. If a session involved re-discovering
+something, that's the signal it belongs here. Keep entries short, imperative,
+and in the most relevant existing section (add one if none fits); prune
+entries that code changes have made obsolete.
+
 ## What this project is
 
 boxel is a **generic-operation MCP server** (`tunnel-mcp`) that tunnels the
