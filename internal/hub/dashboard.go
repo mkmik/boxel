@@ -3,6 +3,7 @@ package hub
 import (
 	"html/template"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -20,13 +21,19 @@ type dashboardData struct {
 	Rows      []dashboardRow
 	Connected int
 	Messages  int64
+	// Email is the viewer's exe.dev edge identity, when present; it enables
+	// the sign-out control (which posts to the platform's logout endpoint).
+	Email string
 }
 
 // handleDashboard renders the agent status dashboard: every agent that has
 // registered since the hub started, whether it is currently connected, and how
 // many messages the mux proxied to it.
 func (h *Hub) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	data := dashboardData{Version: h.cfg.Version}
+	data := dashboardData{
+		Version: h.cfg.Version,
+		Email:   strings.TrimSpace(r.Header.Get(HeaderExeEmail)),
+	}
 	now := time.Now()
 	for _, a := range h.Agents() {
 		row := dashboardRow{AgentInfo: a}
@@ -79,10 +86,18 @@ var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE htm
   .empty { padding: 2rem 0; opacity: .7; }
   footer { margin-top: 1.5rem; font-size: .8rem; opacity: .6; }
   a { color: inherit; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  .who { font-size: .85rem; opacity: .75; display: flex; align-items: baseline; gap: .6rem; }
+  .who form { display: inline; margin: 0; }
+  .who button { font: inherit; padding: .15rem .6rem; border-radius: 6px; border: 1px solid color-mix(in srgb, currentColor 40%, transparent); background: transparent; color: inherit; cursor: pointer; }
+  .who button:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
 </style>
 </head>
 <body>
+<header>
 <h1>boxel hub — agents</h1>
+{{if .Email}}<div class="who">{{.Email}}<form method="post" action="/__exe.dev/logout"><button type="submit">Sign out</button></form></div>{{end}}
+</header>
 <p class="summary">{{.Connected}} of {{len .Rows}} agent{{if ne (len .Rows) 1}}s{{end}} connected · {{.Messages}} message{{if ne .Messages 1}}s{{end}} proxied · refreshes every 5s</p>
 {{if .Rows}}
 <table>

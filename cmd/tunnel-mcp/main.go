@@ -6,15 +6,20 @@
 //   - stdio (default, for local testing):  tunnel-mcp --workspace /work
 //   - streamable HTTP (for remote/phone):  tunnel-mcp --http :8080 --token-file t.txt
 //
+// On the HTTP transport, --idp-issuer additionally serves a built-in OIDC
+// identity provider (see internal/idp) in the same process, and /mcp accepts
+// its OAuth tokens — real OAuth for programmatic MCP connectors.
+//
 // The HTTP transport is meant to sit behind a TLS-terminating tunnel
-// (Cloudflare Tunnel, Tailscale Funnel) with OAuth handled by the fronting
-// layer; the built-in static bearer token is a defense-in-depth check and a
-// local-testing convenience, not the production auth story.
+// (Cloudflare Tunnel, Tailscale Funnel, the exe.dev edge). Production auth is
+// OAuth via the built-in IDP or the fronting layer's SSO; the static bearer
+// token is a defense-in-depth check and a local-testing convenience.
 package main
 
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -32,6 +37,7 @@ import (
 	"github.com/mkmik/boxel/internal/audit"
 	"github.com/mkmik/boxel/internal/hub"
 	"github.com/mkmik/boxel/internal/hubagent"
+	"github.com/mkmik/boxel/internal/idp"
 	"github.com/mkmik/boxel/internal/metrics"
 	"github.com/mkmik/boxel/internal/policy"
 	"github.com/mkmik/boxel/internal/session"
@@ -65,6 +71,11 @@ type opts struct {
 	hubTokenFile   string
 	hubIntegration string
 	reflectionURL  string
+
+	// Built-in OIDC IDP.
+	idpIssuer  string
+	idpUsers   string
+	idpKeyFile string
 }
 
 func main() {
@@ -91,6 +102,9 @@ func main() {
 	flag.StringVar(&o.hubTokenFile, "hub-token-file", os.Getenv("BOXEL_AGENT_TOKEN_FILE"), "with --hub-connect: read the registration token from this file")
 	flag.StringVar(&o.hubIntegration, "hub-integration", os.Getenv("BOXEL_HUB_INTEGRATION"), "with --hub-connect: hub peer-integration name to autodiscover via reflection (default boxel)")
 	flag.StringVar(&o.reflectionURL, "hub-reflection-url", os.Getenv("BOXEL_REFLECTION_URL"), "with --hub-connect: exe.dev reflection base URL for autodiscovery (default https://reflection.int.exe.xyz)")
+	flag.StringVar(&o.idpIssuer, "idp-issuer", "", "enable the built-in OIDC IDP and accept its OAuth bearer tokens on /mcp (an alternative to --token/--owner-email): the external base URL of this deployment as OAuth clients see it (e.g. https://myvm.exe.xyz). Auto-enabled as https://<hostname>.exe.xyz when --owner-email is the sole configured auth; pass 'none' to disable. Serves the OAuth/OIDC well-knowns plus "+idp.AuthorizePath+", "+idp.TokenPath+", "+idp.RegisterPath+"; the authorize endpoint trusts the exe.dev edge identity header. See docs/deployment.md §4b.")
+	flag.StringVar(&o.idpUsers, "idp-users", "", "comma-separated emails allowed to authenticate at the built-in IDP (default: --owner-email)")
+	flag.StringVar(&o.idpKeyFile, "idp-key-file", "", "path to the IDP's P-256 signing key PEM, created on first run if missing (default: <user config dir>/boxel/idp-key.pem)")
 	flag.Parse()
 
 	if err := run(o); err != nil {
@@ -170,6 +184,13 @@ func run(o opts) error {
 		return err
 	}
 	hubEnabled := hubToken != "" || o.hubAgentOwnerEmail != ""
+	idpDisabled := strings.EqualFold(o.idpIssuer, "none")
+	if idpDisabled {
+		o.idpIssuer = ""
+	}
+	if o.idpIssuer != "" && o.httpAddr == "" {
+		return fmt.Errorf("the built-in IDP requires the HTTP transport: pass --http")
+	}
 
 	// The streamable MCP handler is shared by every transport below (the direct
 	// --http listener and the in-process pull-mode agent), so sessions are
@@ -199,16 +220,51 @@ func run(o opts) error {
 	if err != nil {
 		return err
 	}
-	guard, authOK, authDesc, err := authLayers(bearer, o.ownerEmail)
+	// Zero-config default: when exe.dev edge identity is the sole configured
+	// client auth (--owner-email, no static bearer), enable the IDP
+	// automatically under this VM's exe.dev hostname — an existing
+	// deployment picks up OAuth on update, with no flag changes, and can be
+	// `share set-public` for OAuth connectors. This adds no trust the
+	// deployment hasn't already assumed: anyone who could defeat the edge
+	// identity header would already satisfy --owner-email directly. It is
+	// deliberately NOT done when a bearer token is configured — there the
+	// static pair requires token AND identity, and OAuth would weaken it to
+	// identity alone.
+	if !idpDisabled && o.idpIssuer == "" && o.ownerEmail != "" && bearer == "" {
+		if issuer := defaultIDPIssuer(); issuer != "" {
+			o.idpIssuer = issuer
+			log.Printf("idp: auto-enabled with issuer %s (--owner-email is the sole auth; set --idp-issuer to override, or --idp-issuer none to disable)", issuer)
+		}
+	}
+	// The same process is both the OIDC issuer and the protected MCP
+	// resource: enabling the IDP makes /mcp accept its tokens.
+	var idpSrv *idp.Server
+	var verifier *idp.Verifier
+	if o.idpIssuer != "" {
+		idpSrv, err = buildIDP(o)
+		if err != nil {
+			return err
+		}
+		verifier = idpSrv.Verifier()
+	}
+	guard, authOK, authDesc, err := authLayers(bearer, o.ownerEmail, verifier)
 	if err != nil {
 		return err
 	}
 
+	// Routes are registered unguarded here; the server handler below applies
+	// the auth guard to EVERYTHING except the explicit public allowlist
+	// (withGuard), so a forgotten wrap can never expose a new route.
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", guard(handler))
+	mux.Handle("/mcp", handler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
+	if idpSrv != nil {
+		idpSrv.AttachRoutes(mux)
+		attachResourceMetadata(mux, idpSrv.Issuer())
+		log.Printf("idp: OIDC identity provider enabled, issuer %s", idpSrv.Issuer())
+	}
 
 	if hubEnabled {
 		hb := hub.New(hub.Config{
@@ -218,7 +274,11 @@ func run(o opts) error {
 			InstallerAuth: authOK,
 			Version:       tunnel.Version,
 		})
-		hb.AttachRoutes(mux, guard)
+		// No per-route guard: withGuard already covers the dashboard,
+		// /vm/<name>/ proxy, and /agents; the registration and installer
+		// endpoints are on the public allowlist (they authenticate
+		// themselves — see isPublicPath).
+		hb.AttachRoutes(mux, nil)
 		log.Printf("hub: pull-mode multiplexer enabled: /vm/{name}/ proxy, %s registration, %s installer", hub.ConnectPath, hub.InstallerPath)
 		if o.hubAgentListen != "" {
 			amux := http.NewServeMux()
@@ -244,7 +304,7 @@ func run(o opts) error {
 		}()
 	}
 
-	hs := &http.Server{Addr: o.httpAddr, Handler: mux}
+	hs := &http.Server{Addr: o.httpAddr, Handler: withGuard(guard, mux)}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -350,35 +410,41 @@ const exeEmailHeader = "X-ExeDev-Email"
 
 // authLayers builds the configured HTTP auth: a middleware that wraps a
 // handler with the enforcing layers, and a boolean predicate over a request
-// (used to decide whether the hub installer may embed the agent token). bearer
-// (if set) requires a matching Authorization: Bearer token; ownerEmail (if
-// set) requires the exe.dev edge identity header to equal that address. Both
-// may be enabled, in which case a request must satisfy both. At least one must
-// be configured — the invoke tool is authenticated RCE, so listening
-// unauthenticated is refused. Returns a short description for logging.
-func authLayers(bearer, ownerEmail string) (wrap func(http.Handler) http.Handler, ok func(*http.Request) bool, desc string, err error) {
-	var layers []string
+// (used to decide whether the hub installer may embed the agent token).
+//
+// Two alternative methods can satisfy a request:
+//   - static: bearer (if set) requires a matching Authorization: Bearer
+//     token; ownerEmail (if set) requires the exe.dev edge identity header to
+//     equal that address. Both may be enabled, in which case a request must
+//     satisfy both.
+//   - oauth: a valid access token from the built-in IDP (whose --idp-users
+//     allowlist already gates who can obtain one).
+//
+// At least one method must be configured — the invoke tool is authenticated
+// RCE, so listening unauthenticated is refused. Returns a short description
+// for logging.
+func authLayers(bearer, ownerEmail string, oauth *idp.Verifier) (wrap func(http.Handler) http.Handler, ok func(*http.Request) bool, desc string, err error) {
+	var static []string
 	if bearer != "" {
-		layers = append(layers, "bearer")
+		static = append(static, "bearer")
 	}
 	if ownerEmail != "" {
-		layers = append(layers, "exe-identity("+ownerEmail+")")
+		static = append(static, "exe-identity("+ownerEmail+")")
 	}
-	if len(layers) == 0 {
-		return nil, nil, "", fmt.Errorf("HTTP transport requires authentication: pass --token/--token-file/$BOXEL_TOKEN and/or --owner-email (the invoke tool is authenticated RCE; refusing to listen unauthenticated)")
+	var methods []string
+	if len(static) > 0 {
+		methods = append(methods, strings.Join(static, "+"))
 	}
-	wrap = func(next http.Handler) http.Handler {
-		// Wrapped inner-to-outer so the bearer is checked first.
-		h := next
-		if ownerEmail != "" {
-			h = requireExeIdentity(ownerEmail, h)
+	if oauth != nil {
+		methods = append(methods, "oauth("+oauth.Issuer()+")")
+	}
+	if len(methods) == 0 {
+		return nil, nil, "", fmt.Errorf("HTTP transport requires authentication: pass --token/--token-file/$BOXEL_TOKEN, --owner-email, and/or --idp-issuer (the invoke tool is authenticated RCE; refusing to listen unauthenticated)")
+	}
+	staticOK := func(r *http.Request) bool {
+		if len(static) == 0 {
+			return false
 		}
-		if bearer != "" {
-			h = requireBearer(bearer, h)
-		}
-		return h
-	}
-	ok = func(r *http.Request) bool {
 		if bearer != "" && !bearerOK(r, bearer) {
 			return false
 		}
@@ -387,7 +453,43 @@ func authLayers(bearer, ownerEmail string) (wrap func(http.Handler) http.Handler
 		}
 		return true
 	}
-	return wrap, ok, strings.Join(layers, "+"), nil
+	oauthOK := func(r *http.Request) bool {
+		if oauth == nil {
+			return false
+		}
+		_, err := oauth.VerifyRequest(r)
+		return err == nil
+	}
+	ok = func(r *http.Request) bool {
+		return staticOK(r) || oauthOK(r)
+	}
+	wrap = func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if ok(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// RFC 9728: point OAuth-capable clients at the protected-resource
+			// metadata so they can discover the authorization server.
+			challenge := `Bearer realm="tunnel-mcp"`
+			if oauth != nil {
+				challenge = fmt.Sprintf(`Bearer realm="tunnel-mcp", resource_metadata=%q`,
+					requestOrigin(r)+"/.well-known/oauth-protected-resource"+r.URL.Path)
+			}
+			w.Header().Set("WWW-Authenticate", challenge)
+			switch {
+			case bearer != "" && !bearerOK(r, bearer):
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+			case ownerEmail != "" && strings.TrimSpace(r.Header.Get(exeEmailHeader)) == "":
+				http.Error(w, "unauthorized: missing exe.dev identity", http.StatusUnauthorized)
+			case ownerEmail != "":
+				http.Error(w, "forbidden: not the authorized owner", http.StatusForbidden)
+			default:
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+			}
+		})
+	}
+	return wrap, ok, strings.Join(methods, " or "), nil
 }
 
 func bearerOK(r *http.Request, token string) bool {
@@ -403,33 +505,144 @@ func exeIdentityOK(r *http.Request, ownerEmail string) bool {
 	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
-func requireBearer(token string, next http.Handler) http.Handler {
+// buildIDP constructs the built-in IDP from the flags. The allowlist falls
+// back to --owner-email so the common single-owner deployment needs no extra
+// flag.
+func buildIDP(o opts) (*idp.Server, error) {
+	if o.idpIssuer == "" {
+		return nil, fmt.Errorf("the built-in IDP requires --idp-issuer (the external base URL, e.g. https://myvm.exe.xyz)")
+	}
+	users := splitEmails(o.idpUsers)
+	if len(users) == 0 && o.ownerEmail != "" {
+		users = []string{o.ownerEmail}
+	}
+	if len(users) == 0 {
+		return nil, fmt.Errorf("the built-in IDP requires an allowlist: pass --idp-users (or --owner-email)")
+	}
+	keyFile := o.idpKeyFile
+	if keyFile == "" {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return nil, fmt.Errorf("cannot locate the default --idp-key-file directory: %w", err)
+		}
+		if err := os.MkdirAll(filepath.Join(dir, "boxel"), 0o700); err != nil {
+			return nil, fmt.Errorf("create idp key directory: %w", err)
+		}
+		keyFile = filepath.Join(dir, "boxel", "idp-key.pem")
+	}
+	key, err := idp.LoadOrCreateKey(keyFile)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("idp: signing key %s", keyFile)
+	return idp.New(idp.Config{Issuer: o.idpIssuer, Users: users, Key: key})
+}
+
+// defaultIDPIssuer derives the issuer for IDP auto-enablement: this VM's
+// public URL under the exe.dev proxy naming convention (short hostname ==
+// VM name, the same convention pull-mode agents register under).
+func defaultIDPIssuer() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	short, _, _ := strings.Cut(h, ".")
+	short = strings.ToLower(short)
+	if short == "" {
+		return ""
+	}
+	return "https://" + short + ".exe.xyz"
+}
+
+// splitEmails parses a comma-separated email list, dropping empties.
+func splitEmails(s string) []string {
+	var out []string
+	for _, e := range strings.Split(s, ",") {
+		if e = strings.TrimSpace(e); e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// isPublicPath reports whether a path must remain reachable without client
+// auth. The list is deliberately closed:
+//   - /healthz: liveness probe.
+//   - /.well-known/*: OAuth/OIDC discovery documents (RFC 8414/9728) — the
+//     spec requires clients to fetch these before they have any credential.
+//   - /idp/*: the OAuth flow endpoints. Each is self-authorizing: /authorize
+//     requires the exe.dev edge identity, /token requires a valid single-use
+//     code or refresh token, /userinfo requires an access token, /register
+//     hands out only a client_id (which grants nothing), /jwks is public key
+//     material.
+//   - the hub agent registration endpoint (authenticates agents itself) and
+//     the installer script (deliberately tokenless unless the fetch is
+//     authenticated — see hub.Config.InstallerAuth).
+//
+// Everything else — /mcp, the dashboard, /vm/<name>/, /agents, and any route
+// added in the future — is guarded by default.
+func isPublicPath(path string) bool {
+	switch path {
+	case "/healthz", hub.ConnectPath, hub.InstallerPath:
+		return true
+	}
+	return strings.HasPrefix(path, "/.well-known/") || strings.HasPrefix(path, "/idp/")
+}
+
+// withGuard applies the auth guard to every request except the public
+// allowlist. Default-deny: routes are guarded unless isPublicPath says
+// otherwise.
+func withGuard(guard func(http.Handler) http.Handler, mux http.Handler) http.Handler {
+	guarded := guard(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !bearerOK(r, token) {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="tunnel-mcp"`)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if isPublicPath(r.URL.Path) {
+			mux.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(w, r)
+		guarded.ServeHTTP(w, r)
 	})
 }
 
-// requireExeIdentity enforces that the exe.dev edge authenticated the request
-// as the owner. A missing header means the request did not come through the
-// authenticating edge (or the VM is public without identity injection) and is
-// rejected; a present-but-different email is a forbidden non-owner.
-func requireExeIdentity(ownerEmail string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.TrimSpace(r.Header.Get(exeEmailHeader)) == "" {
-			http.Error(w, "unauthorized: missing exe.dev identity", http.StatusUnauthorized)
-			return
+// requestOrigin reconstructs the external origin of a request arriving
+// through the TLS-terminating edge (X-Forwarded-*), falling back to the
+// direct connection's view.
+func requestOrigin(r *http.Request) string {
+	scheme := r.Header.Get("X-Forwarded-Proto")
+	if scheme == "" {
+		if r.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
 		}
-		if !exeIdentityOK(r, ownerEmail) {
-			http.Error(w, "forbidden: not the authorized owner", http.StatusForbidden)
-			return
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	return scheme + "://" + host
+}
+
+// attachResourceMetadata serves the RFC 9728 OAuth protected-resource
+// metadata: it tells OAuth clients (via the 401 WWW-Authenticate challenge)
+// which authorization server guards this MCP resource. The well-known suffix
+// names the resource path, so /.well-known/oauth-protected-resource/mcp
+// describes /mcp and .../vm/<name>/mcp describes a hub-proxied VM.
+func attachResourceMetadata(mux *http.ServeMux, issuer string) {
+	h := func(w http.ResponseWriter, r *http.Request) {
+		suffix := strings.TrimPrefix(r.URL.Path, "/.well-known/oauth-protected-resource")
+		if suffix == "" || suffix == "/" {
+			suffix = "/mcp"
 		}
-		next.ServeHTTP(w, r)
-	})
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resource":                 requestOrigin(r) + suffix,
+			"authorization_servers":    []string{issuer},
+			"bearer_methods_supported": []string{"header"},
+		})
+	}
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource", h)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/", h)
 }
 
 // resolveHubToken resolves the hub agent registration token from the flags or

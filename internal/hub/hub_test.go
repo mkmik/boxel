@@ -193,6 +193,32 @@ func TestDashboardAndStatus(t *testing.T) {
 	}
 }
 
+// TestDashboardLogoutControl: the dashboard shows the viewer's exe.dev
+// identity and a sign-out form (posting to the platform logout endpoint) when
+// the edge identity header is present, and neither when it is absent.
+func TestDashboardLogoutControl(t *testing.T) {
+	_, ts := startHub(t, hub.Config{AgentToken: "tok"})
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/", nil)
+	req.Header.Set("X-ExeDev-Email", "owner@example.com")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	body := string(b)
+	for _, want := range []string{"owner@example.com", "Sign out", "/__exe.dev/logout"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard with identity missing %q; body:\n%s", want, body)
+		}
+	}
+
+	if _, body := get(t, ts.URL+"/"); strings.Contains(body, "Sign out") {
+		t.Errorf("dashboard without identity shows a sign-out control; body:\n%s", body)
+	}
+}
+
 // TestPullModeInProcessHandler verifies the portless mode: an agent configured
 // with an in-process http.Handler (no Target URL, no local listener) serves the
 // hub's proxied requests directly, and is reachable through /vm/<name>/.
