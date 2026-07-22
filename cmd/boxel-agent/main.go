@@ -14,8 +14,10 @@
 // writes /etc/boxel-agent/env, and enables a hardened systemd unit. It
 // succeeds even when the hub is not reachable yet — the service keeps
 // retrying, and setup prints exactly what remains to be done (e.g. attaching
-// the exe.dev peer integration). The hub's /install-agent script is a thin
-// wrapper around `go install` + `boxel-agent setup`.
+// the exe.dev peer integration). Note the hub's /install-agent script no
+// longer uses this binary: it installs the single-process
+// `tunnel-mcp --hub-connect` agent instead, reusing the same unit names, so
+// `boxel-agent setup` is the forward-mode alternative.
 //
 // The `update` subcommand (run as root every 5 minutes by the
 // boxel-agent-update.timer that setup installs) checks the Go module proxy

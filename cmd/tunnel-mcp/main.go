@@ -89,7 +89,7 @@ func main() {
 	flag.StringVar(&o.hubName, "hub-name", os.Getenv("BOXEL_AGENT_NAME"), "with --hub-connect: handle to register under, becomes the /vm/<name>/ path (default: this VM's short hostname)")
 	flag.StringVar(&o.hubToken, "hub-token", "", "with --hub-connect: registration bearer token to present to the hub (or BOXEL_AGENT_TOKEN); not needed on exe.dev identity hubs")
 	flag.StringVar(&o.hubTokenFile, "hub-token-file", os.Getenv("BOXEL_AGENT_TOKEN_FILE"), "with --hub-connect: read the registration token from this file")
-	flag.StringVar(&o.hubIntegration, "hub-integration", os.Getenv("BOXEL_HUB_INTEGRATION"), "with --hub-connect: hub peer-integration name to autodiscover via reflection (default boxel-hub)")
+	flag.StringVar(&o.hubIntegration, "hub-integration", os.Getenv("BOXEL_HUB_INTEGRATION"), "with --hub-connect: hub peer-integration name to autodiscover via reflection (default boxel)")
 	flag.StringVar(&o.reflectionURL, "hub-reflection-url", os.Getenv("BOXEL_REFLECTION_URL"), "with --hub-connect: exe.dev reflection base URL for autodiscovery (default https://reflection.int.exe.xyz)")
 	flag.Parse()
 
