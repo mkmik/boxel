@@ -7,11 +7,13 @@ dial *out* to the hub and register under their short hostname; the hub then
 proxies `/vm/<name>/…` to them:
 
 ```
-Claude connector ── https://boxel.exe.xyz/vm/foobar/mcp
+Claude connector ── https://boxel.exe.xyz/mcp          (fleet dispatcher)
+                 ── https://boxel.exe.xyz/vm/foobar/mcp (per-VM proxy)
                           │
                  ┌────────▼─────────┐    exe.dev edge (TLS + SSO) → hub VM
                  │  tunnel-mcp hub  │
-                 │  /mcp      local sandbox (as before)
+                 │  /mcp            ── fleet dispatcher: pick a VM per call or
+                 │                     session; default "local" = own sandbox
                  │  /                ── dashboard (agents, status, traffic)
                  │  /vm/{name}/…    ── proxied to agent "name"
                  │  /agents         ── registry (JSON)
@@ -84,11 +86,49 @@ with h2 PINGs every 30s, and the agent reconnects with exponential backoff. A
 re-registration under the same name atomically replaces the previous channel,
 so an agent restart never needs hub-side cleanup.
 
-An alternative design — multiplexing through the hub's own `/mcp` endpoint
-with a session/parameter switch — was considered and rejected: MCP sessions
-are transport-scoped (a streamable-HTTP session pins server state), clients
-cache tool lists per server, and the path-based scheme gets URL routing, auth,
-and future non-MCP APIs for free.
+Selecting the VM at the MCP *transport* layer was considered and rejected:
+the streamable-HTTP session id is server-assigned and `initialize` carries no
+client-choosable configuration, so a connector's only degree of freedom is
+the URL — which is exactly the `/vm/<name>/mcp` scheme, and it keeps URL
+routing, auth, and future non-MCP APIs for free. The single-endpoint
+experience lives one layer up instead: the **fleet dispatcher** (next
+section) terminates MCP on the hub's own `/mcp` and makes the VM part of the
+*tool* semantics, which works because every VM advertises the identical
+generic surface.
+
+## Fleet dispatcher: one endpoint, VM chosen at the tool layer
+
+With the hub enabled, the hub's `/mcp` serves the **fleet dispatcher**
+instead of the plain local server: the same generic surface (`invoke` /
+`describe` / `session`), extended with an optional `"vm"` argument naming
+the target sandbox. One connector registration — one URL, one credential —
+covers the whole fleet, and the model picks the VM at runtime:
+
+- `describe` (no arguments) reports the fleet: every registered VM with its
+  connection state, plus `"local"` — the hub's own sandbox and the default
+  target, so a client that never mentions `vm` gets exactly the
+  pre-dispatcher behavior.
+- `session {"action": "create", "session": "job", "vm": "foobar"}` binds the
+  logical session to a VM; subsequent `invoke` calls carrying
+  `"session": "job"` route there with no per-call `vm`. Creating again with
+  a different `vm` rebinds, and `session` list (no `vm`) includes the
+  binding table. Bindings are pruned on the same idle TTL as tunnel
+  sessions (`--session-ttl`).
+- An explicit `"vm"` on `invoke` overrides the binding for that call only.
+- Forwarding rides the same reverse HTTP/2 channels as the `/vm/<name>/`
+  proxy: the dispatcher keeps one MCP client session per agent, dialed
+  lazily against the agent's in-process `/mcp`, and re-dials automatically
+  when the agent's channel is replaced (restart / reconnect).
+- Failures surface as structured tool errors mirroring the proxy's 502
+  bodies — `vm_not_connected` (no such agent registered) and
+  `vm_unreachable` (channel or call failure) — so the model can react.
+
+`invoke` results pass through byte-exact; the dispatcher never annotates
+tool output (only `describe`/`session` responses gain `vm`/`fleet`/
+`bindings` keys). One caveat: elicitation ("ask" permission prompts) does
+not relay through the dispatcher — moot in practice, since fleet agents
+default to `bypassPermissions`. The `/vm/<name>/mcp` proxy remains available
+unchanged as the direct-addressing fallback, behind the same credential.
 
 ## exe.dev setup (recommended): zero tokens
 
