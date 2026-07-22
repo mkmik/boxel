@@ -57,6 +57,11 @@ To set up the hub itself, see the
 | `describe` | Supported tool names + input schemas, active permission mode + redacted policy, sandbox metadata (hostname, OS, workspace root), sessions, limits. |
 | `session` | Create / list / reset logical sessions (cwd, env, background shells, permission overlay). |
 
+On a pull-mode hub the same three tools are served by the **fleet
+dispatcher**, which adds an optional `"vm"` argument to each (target VM;
+`"local"` = the hub's own sandbox, and the default) — see
+[Pull mode](#pull-mode-one-hub-many-non-routable-vms).
+
 ### Tunneled tools (v1)
 
 `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `BashOutput`, `KillShell` — implemented natively with **byte-exact Claude Code semantics** (identical output formats and failure-mode strings), so the model's recovery behavior transfers unchanged. Use the exact input schemas you use natively; call `describe` if unsure. Unknown tool names return `{"error": "unknown_tool", "supported": [...]}`.
@@ -159,8 +164,8 @@ private VM's edge would swallow them with a login redirect. Identity is still
 rooted in exe.dev because `/idp/authorize` is the only place codes come from,
 and it requires the edge-injected identity header (still injected on public
 VMs for logged-in visitors). This composes with the pull-mode hub: enable
-`--idp-issuer` on the hub and one OAuth connector credential covers
-`/vm/<name>/mcp` for the whole fleet. Pair it with `--owner-email` so
+`--idp-issuer` on the hub and one OAuth connector credential covers the
+fleet dispatcher at `/mcp` and every `/vm/<name>/mcp`. Pair it with `--owner-email` so
 browser surfaces (the dashboard, `/agents`) keep working through exe.dev
 edge identity while connectors use OAuth — the two methods are alternatives,
 either satisfies the guard. See
@@ -185,9 +190,19 @@ over that channel, so for VM `foobar`:
 - any other path under `/vm/foobar/` also reaches `foobar` (e.g.
   `/vm/foobar/healthz` hits the local instance's health check)
 
-One connector origin and one credential cover the whole fleet: `/vm/…` and
-`/agents` (the JSON registry) sit behind the hub's normal client auth
-(`--token` / `--owner-email`), the same as its own `/mcp`.
+The hub's own `/mcp` additionally serves the **fleet dispatcher**: the same
+`invoke`/`describe`/`session` surface with an optional `"vm"` argument, so a
+*single* connector endpoint covers every VM — `describe` lists the fleet,
+`session {"action":"create","session":<id>,"vm":<name>}` binds a session to a
+VM, and invokes carrying that session route there over the same reverse
+channel. The default target `"local"` is the hub's own sandbox, so clients
+that never pass `vm` behave as before; the per-VM `/vm/<name>/mcp` endpoints
+remain as the direct-addressing fallback. See
+[`docs/pull-mode.md`](docs/pull-mode.md#fleet-dispatcher-one-endpoint-vm-chosen-at-the-tool-layer).
+
+One connector origin and one credential cover the whole fleet: `/mcp`,
+`/vm/…` and `/agents` (the JSON registry) all sit behind the hub's normal
+client auth (`--token` / `--owner-email`).
 
 On exe.dev there is no VM-to-VM network; agents reach the hub through a
 **peer integration** — an exe.dev-managed proxy at
@@ -301,9 +316,14 @@ systemctl status boxel-agent && journalctl -u boxel-agent -n 5
 #   https://HUB_VM.exe.xyz/vm/SOME_VM/healthz → "ok" from the VM's local boxel
 ```
 
-**Step 5 — connect Claude**: point the MCP connector at
-`https://HUB_VM.exe.xyz/vm/SOME_VM/mcp` with the hub's credentials (see
-[`docs/deployment.md`](docs/deployment.md) for the connector auth options).
+**Step 5 — connect Claude**: point the MCP connector at the fleet
+dispatcher, `https://HUB_VM.exe.xyz/mcp`, with the hub's credentials (see
+[`docs/deployment.md`](docs/deployment.md) for the connector auth options) —
+one connector covers the whole fleet. Call `describe` to list VMs, then bind
+a session (`session {"action":"create","session":"job","vm":"SOME_VM"}`) so
+invokes route to the VM without registering anything per-VM. Alternatively,
+register per-VM connectors against
+`https://HUB_VM.exe.xyz/vm/SOME_VM/mcp` — the direct-addressing fallback.
 The VM's own public hostname stays free: `ssh exe.dev share port SOME_VM
 <your-app-port>` gives it entirely to the app you're developing.
 
@@ -315,6 +335,7 @@ The VM's own public hostname stays free: `ssh exe.dev share port SOME_VM
 | agent logs `hub refused registration: 401` | Hub not started with `--hub-agent-owner-email`, or its value doesn't match the account that owns the VMs. |
 | agent registers, then the channel drops immediately after the 101 | An intermediary isn't passing the `Upgrade: boxel-h2c` handshake through — report it. |
 | `/vm/<name>/…` returns 502 `vm_not_connected` (JSON body) | Agent not running/registered on that VM — check step 4. |
+| dispatcher `invoke`/`session` returns a `vm_not_connected` tool error | Same cause as the proxy's 502: no agent registered under that name — check step 4, or `describe` to list what is connected. |
 | `/vm/<name>/…` returns 502 `agent_forward_failed` (JSON body) | Forward-mode (`boxel-agent`) only — a `--hub-connect` agent serves MCP in-process and has no forward target. The agent is connected but can't reach its **local** forward target: nothing is listening on `--target` (default `127.0.0.1:8080`), or it's on a different port. Start the local server, or fix `--target`. |
 | `/vm/<name>/…` returns 502 with an **empty** body | An older agent (before the diagnostic endpoint) failing to forward — same cause as `agent_forward_failed`. Upgrade `boxel-agent` to get the explanatory body. |
 | unsure whether it's the channel or the local target | Hit `GET /vm/<name>/__boxel-agent` — the agent answers this path **itself** (never forwarded), returning its name/version/`--target` and a live `target_check` reachability probe. A 200 here with `target_check.reachable: false` means the channel is up and the local target is down. |

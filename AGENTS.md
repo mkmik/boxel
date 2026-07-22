@@ -150,6 +150,26 @@ source: the binary version is **derived from embedded build info**
   handshake; intermediaries that strip it break the channel right after
   the 101.
 
+## Fleet dispatcher (hub `/mcp`)
+
+- With the hub enabled, `/mcp` serves the **fleet dispatcher**
+  (`internal/hub/dispatch.go`) — vm-aware `invoke`/`describe`/`session` —
+  instead of the plain local server. Its default target `"local"` (the hub's
+  own sandbox) preserves pre-dispatcher client behavior; keep that default.
+  `/vm/<name>/mcp` stays as the dumb direct-addressing fallback — don't
+  remove it.
+- `invoke` results pass through **byte-exact** (the tool-output contract):
+  only `describe`/`session` responses may be augmented (`vm`/`fleet`/
+  `bindings` keys).
+- Backend MCP client sessions are cached keyed to the agent's channel
+  generation (`*agentConn` identity) and re-dialed when it changes. Do NOT
+  add blind retries after a `CallTool` failure — the mutation may already
+  have executed; the sole automatic retry is the stale-session 404 case,
+  which provably precedes dispatch.
+- MCP-transport-level VM selection is impossible by design (server-assigned
+  session id, no client config slot in `initialize`) — don't reattempt it;
+  the tool layer is the selection point.
+
 ## Fleet agent / installer contract
 
 - The default, installer-provisioned agent is a **single process**:

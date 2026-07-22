@@ -283,8 +283,15 @@ func run(o opts) error {
 	// Routes are registered unguarded here; the server handler below applies
 	// the auth guard to EVERYTHING except the explicit public allowlist
 	// (withGuard), so a forgotten wrap can never expose a new route.
+	//
+	// /mcp: with the hub enabled it serves the fleet dispatcher (vm-aware
+	// invoke/session/describe; the default target "local" is this instance's
+	// own sandbox, so plain clients keep working); otherwise the plain local
+	// tunnel server. The per-VM /vm/<name>/mcp proxy is unaffected either way.
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", handler)
+	if !hubEnabled {
+		mux.Handle("/mcp", handler)
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
@@ -307,7 +314,12 @@ func run(o opts) error {
 		// endpoints are on the public allowlist (they authenticate
 		// themselves — see isPublicPath).
 		hb.AttachRoutes(mux, nil)
-		log.Printf("hub: pull-mode multiplexer enabled: /vm/{name}/ proxy, %s registration, %s installer", hub.ConnectPath, hub.InstallerPath)
+		mux.Handle("/mcp", newStreamableHandler(hub.NewDispatcher(hub.DispatcherConfig{
+			Hub:        hb,
+			Local:      srv,
+			SessionTTL: o.sessionTTL,
+		})))
+		log.Printf("hub: pull-mode multiplexer enabled: /mcp fleet dispatcher, /vm/{name}/ proxy, %s registration, %s installer", hub.ConnectPath, hub.InstallerPath)
 		if o.hubAgentListen != "" {
 			amux := http.NewServeMux()
 			amux.Handle("GET "+hub.ConnectPath, hb.ConnectHandler())
