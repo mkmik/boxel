@@ -21,9 +21,9 @@ Claude connector ── https://boxel.exe.xyz/vm/foobar/mcp
                           │ exe.dev peer integration (boxel.int.exe.xyz)
                           │ — authenticated, outbound-only
                  ┌────────┴─────────┐
-                 │   boxel-agent    │  VM "foobar" (no exposed port needed)
-                 │   forwards to    │
-                 │ 127.0.0.1:8080   │  ← local tunnel-mcp (or any HTTP server)
+                 │    tunnel-mcp    │  VM "foobar" (no exposed port needed)
+                 │  --hub-connect   │  single process: serves its own MCP
+                 │                  │  in-process over the reverse channel
                  └──────────────────┘
 ```
 
@@ -40,32 +40,31 @@ client auth.
 
 ## Two ways to serve the agent side
 
-The diagram shows the **forward** mode: a standalone `boxel-agent` process dials
-the hub and forwards proxied requests over loopback to a *separate* local HTTP
-server (`127.0.0.1:8080`). That server can be a `tunnel-mcp` instance **or any
-HTTP app** — the agent is content-agnostic, so the same binary can expose a web
-app, a notebook, whatever is on that port.
-
-When the thing you want to expose is boxel's own MCP, the loopback hop and the
-second process are avoidable. `tunnel-mcp --hub-connect` dials the hub and
-serves its **own MCP mux in-process** over the reverse channel — no local port,
-no `boxel-agent`, no local-token injection, and no "nothing listening on 8080 →
-502" failure mode:
+The diagram shows the default shape — the one the hub's `/install-agent`
+script sets up: a **single** `tunnel-mcp --hub-connect` process dials the hub
+and serves its **own MCP mux in-process** over the reverse channel. No local
+port, no separate `boxel-agent` process, no local-token injection, and no
+"nothing listening on 8080 → 502" failure mode:
 
 ```sh
 tunnel-mcp \
   --workspace /home/agent/work \
-  --owner-email you@example.com \
   --hub-connect                 # dial out; no --http, no local listener
   # --hub-url / --hub-name / --hub-token optional; defaults = autodiscover + hostname
 ```
 
+The alternative is the **forward** mode: a standalone `boxel-agent` process
+dials the hub and forwards proxied requests over loopback to a *separate*
+local HTTP server (`127.0.0.1:8080`). That server can be a `tunnel-mcp`
+instance **or any HTTP app** — the agent is content-agnostic, so the same
+binary can expose a web app, a notebook, whatever is on that port.
+
 `--hub-connect` also composes with `--http` if a VM wants *both* a direct
-listener and a hub registration. Pick forward mode (`boxel-agent`) to front an
-arbitrary local app; pick `--hub-connect` for the common "expose this VM's MCP
-through the hub" case. Either way the hub is the auth boundary — it guards
-`/vm/<name>/` with its client auth, so the in-process `/mcp` needs no second
-credential.
+listener and a hub registration. Pick `--hub-connect` for the common "expose
+this VM's MCP through the hub" case; pick forward mode (`boxel-agent`) to
+front an arbitrary local app. Either way the hub is the auth boundary — it
+guards `/vm/<name>/` with its client auth, so the in-process `/mcp` needs no
+second credential.
 
 ## How the reverse channel works
 
@@ -171,16 +170,50 @@ registration doesn't have this problem: names are platform-verified.
 ## Installing an agent
 
 ```sh
-# hub-independent bootstrap — works even before the peer integration exists:
-GOBIN=/usr/local/bin go install github.com/mkmik/boxel/cmd/boxel-agent@latest
-sudo /usr/local/bin/boxel-agent setup
-
-# equivalent shortcuts once the hub is reachable:
+# on a fleet VM (needs a Go toolchain ≥ 1.25 and systemd):
 curl -fsSL http://boxel.int.exe.xyz/install-agent | sudo bash       # exe.dev
 curl -fsSL https://<hub>/install-agent | sudo bash                  # generic
 ```
 
-`boxel-agent setup` (which the hub-served script also delegates to):
+The hub-served script installs the **single-process** agent:
+
+1. builds `tunnel-mcp` with `go install` into `/usr/local/bin`;
+2. creates a `boxel-agent` system user, `/etc/boxel-agent/env`, and a jailed
+   workspace (default `/var/lib/boxel-agent/work`, override with
+   `BOXEL_WORKSPACE`);
+3. installs and starts a sandboxed systemd unit (`boxel-agent.service`)
+   running `tunnel-mcp --hub-connect --workspace <workspace>`: **one**
+   process that dials the hub and serves this VM's MCP in-process — no
+   local port, no separate forwarder;
+4. installs a self-update pair (`boxel-agent-update.service` +
+   `boxel-agent-update.timer`): every 5 minutes the timer rebuilds
+   `tunnel-mcp@latest` and, when the binary actually changes, atomically
+   replaces `/usr/local/bin/tunnel-mcp` and restarts the service (source
+   builds — non-release versions — are never clobbered, and a deliberately
+   stopped service is not restarted);
+5. succeeds even when the hub is not reachable yet: the service
+   autodiscovers and retries forever, and the script prints the exact
+   `integrations add` / `tag` commands that remain for the account owner.
+
+Secrets policy: the hub embeds the registration token in the script **only**
+when the installer request itself carried the hub's client credentials; in
+identity mode there is no token at all, so any copy of the script is safe.
+Everything is overridable at install time via `BOXEL_HUB_URL`,
+`BOXEL_HUB_INTEGRATION`, `BOXEL_AGENT_TOKEN`, `BOXEL_AGENT_NAME`,
+`BOXEL_WORKSPACE`.
+
+### Forward mode: `boxel-agent setup`
+
+To front an arbitrary local HTTP server instead, install the standalone
+forwarder — a hub-independent bootstrap that works even before the peer
+integration exists:
+
+```sh
+GOBIN=/usr/local/bin go install github.com/mkmik/boxel/cmd/boxel-agent@latest
+sudo /usr/local/bin/boxel-agent setup
+```
+
+`boxel-agent setup`:
 
 1. copies the binary to `/usr/local/bin/boxel-agent`;
 2. creates a `boxel-agent` system user and `/etc/boxel-agent/env`;
@@ -205,12 +238,13 @@ curl -fsSL https://<hub>/install-agent | sudo bash                  # generic
    minutes — and connects on its own the moment the integration is
    attached.
 
-Secrets policy: the hub embeds the registration token in the script **only**
-when the installer request itself carried the hub's client credentials; in
-identity mode there is no token at all, so any copy of the script is safe.
-Everything is overridable at install time via `BOXEL_HUB_URL`,
-`BOXEL_HUB_INTEGRATION`, `BOXEL_AGENT_TOKEN`, `BOXEL_AGENT_NAME`,
-`BOXEL_AGENT_TARGET`.
+Note the two installers share the `boxel-agent.service` /
+`boxel-agent-update.*` unit names and `/etc/boxel-agent/env`, so running one
+after the other cleanly replaces the previous shape.
+
+Forward-mode install-time overrides: `BOXEL_AGENT_TARGET` (the local URL to
+forward to, default `http://127.0.0.1:8080`) plus the same hub/token/name
+variables as above.
 
 ## Running the agent by hand
 
@@ -252,12 +286,13 @@ The motivating scenario: you develop an HTTP service on VM `foobar`, and want
 exe.dev's edge to forward `foobar.exe.xyz` to *that service* — while still
 driving the VM through boxel from a Claude connector.
 
-1. Run tunnel-mcp on `foobar` bound to `127.0.0.1:8080` (no exposed port).
-2. `ssh exe.dev tag foobar boxel`, then on the VM:
-   `curl -fsSL http://boxel.int.exe.xyz/install-agent | sudo bash`.
-3. Point the Claude connector at `https://<hub-vm>.exe.xyz/vm/foobar/mcp` with
+1. `ssh exe.dev tag foobar boxel`, then on the VM:
+   `curl -fsSL http://boxel.int.exe.xyz/install-agent | sudo bash` — this
+   starts a single `tunnel-mcp --hub-connect` process serving boxel's MCP
+   over the reverse channel (no local port at all).
+2. Point the Claude connector at `https://<hub-vm>.exe.xyz/vm/foobar/mcp` with
    the hub's credentials.
-4. `ssh exe.dev share port foobar <your-app-port>` — the VM's public hostname
+3. `ssh exe.dev share port foobar <your-app-port>` — the VM's public hostname
    now belongs entirely to your app; boxel traffic rides the hub.
 
 ## Limitations
