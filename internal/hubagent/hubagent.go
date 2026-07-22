@@ -50,7 +50,15 @@ type Config struct {
 	Token string
 	// Name is the handle to register under (normally the VM short hostname).
 	Name string
-	// Target is the local base URL proxied requests are forwarded to.
+	// Handler, when set, serves the hub's proxied requests directly in-process
+	// instead of forwarding them over loopback to a local server. This is the
+	// portless mode: the process that owns the MCP mux dials the hub and serves
+	// its own handler over the reverse channel, so no local HTTP port (and no
+	// second process) is needed. When Handler is set, Target and TargetToken
+	// are ignored.
+	Handler http.Handler
+	// Target is the local base URL proxied requests are forwarded to. Used only
+	// when Handler is nil.
 	Target string
 	// TargetToken, when set, replaces the Authorization header on forwarded
 	// requests with "Bearer <TargetToken>" so they authenticate to the local
@@ -97,11 +105,17 @@ func Run(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("invalid hub URL: %w", err)
 		}
 	}
-	target, err := url.Parse(cfg.Target)
-	if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
-		return fmt.Errorf("invalid target URL %q: want http(s)://host[:port][/base]", cfg.Target)
+	var handler http.Handler
+	if cfg.Handler != nil {
+		// Portless in-process mode: serve the caller's handler directly.
+		handler = cfg.Handler
+	} else {
+		target, err := url.Parse(cfg.Target)
+		if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
+			return fmt.Errorf("invalid target URL %q: want http(s)://host[:port][/base]", cfg.Target)
+		}
+		handler = newProxyHandler(cfg, target, cfg.TargetToken)
 	}
-	handler := newProxyHandler(cfg, target, cfg.TargetToken)
 
 	backoff := cfg.MinBackoff
 	var lastErr string
@@ -287,7 +301,11 @@ func runOnce(ctx context.Context, cfg Config, u *url.URL, handler http.Handler) 
 		return fmt.Errorf("hub refused registration: %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 	_ = conn.SetDeadline(time.Time{})
-	cfg.Logf("boxel-agent: registered with hub %s as %q, forwarding to %s", cfg.HubURL, cfg.Name, cfg.Target)
+	dest := "in-process handler"
+	if cfg.Handler == nil {
+		dest = "forwarding to " + cfg.Target
+	}
+	cfg.Logf("boxel-agent: registered with hub %s as %q, %s", cfg.HubURL, cfg.Name, dest)
 
 	// Roles flip: the hub is now the HTTP/2 client; serve its requests. The
 	// hub pings every ~30s, so an idle read beyond 90s means a dead peer.

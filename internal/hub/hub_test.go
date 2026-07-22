@@ -193,6 +193,40 @@ func TestDashboardAndStatus(t *testing.T) {
 	}
 }
 
+// TestPullModeInProcessHandler verifies the portless mode: an agent configured
+// with an in-process http.Handler (no Target URL, no local listener) serves the
+// hub's proxied requests directly, and is reachable through /vm/<name>/.
+func TestPullModeInProcessHandler(t *testing.T) {
+	inproc := http.NewServeMux()
+	inproc.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		fmt.Fprintf(w, "in-process %s %s body=%q", r.Method, r.URL.Path, body)
+	})
+	inproc.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	})
+
+	h, ts := startHub(t, hub.Config{AgentToken: "tok"})
+	startAgent(t, hubagent.Config{
+		HubURL: ts.URL, Token: "tok", Name: "inproc",
+		Handler: inproc, // no Target: served in-process, no loopback
+	})
+	waitRegistered(t, h, "inproc", time.Time{})
+
+	if code, body := get(t, ts.URL+"/vm/inproc/healthz"); code != http.StatusOK || body != "ok" {
+		t.Fatalf("healthz via in-process agent: code %d, body %q", code, body)
+	}
+	resp, err := http.Post(ts.URL+"/vm/inproc/mcp", "application/json", strings.NewReader(`{"hi":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if want := `in-process POST /mcp body="{\"hi\":1}"`; string(b) != want {
+		t.Errorf("mcp via in-process agent: body = %q, want %q", b, want)
+	}
+}
+
 // TestStreamingFlush verifies that response bytes flow through both proxy hops
 // incrementally — the property MCP streamable HTTP (SSE) depends on.
 func TestStreamingFlush(t *testing.T) {
