@@ -160,6 +160,7 @@ Claude's remote-MCP connectors do full OAuth: authorization-server discovery (RF
 ```sh
 tunnel-mcp --http 127.0.0.1:8080 \
   --workspace /home/agent/work --permissions /etc/tunnel-mcp/permissions.json \
+  --owner-email you@example.com \
   --idp-issuer https://<vm>.exe.xyz \
   --idp-users you@example.com \
   --idp-key-file /etc/tunnel-mcp/idp-key.pem
@@ -167,7 +168,7 @@ ssh exe.dev share port <vm> 8080
 ssh exe.dev share set-public <vm>
 ```
 
-This composes with the pull-mode hub (add the `--hub-agent-*` flags to the same process): the auth guard covers `/vm/<name>/mcp` too, so one OAuth connector credential reaches the whole fleet through the hub origin.
+This composes with the pull-mode hub (add the `--hub-agent-*` flags to the same process): the auth guard covers `/vm/<name>/mcp` too, so one OAuth connector credential reaches the whole fleet through the hub origin. The guard is default-deny — only the OAuth discovery/flow endpoints, `/healthz`, and the hub's self-authenticating registration/installer endpoints bypass it — so the dashboard and `/agents` stay behind auth on the public VM; keeping `--owner-email` (as above) lets your logged-in browser reach them via the still-injected edge identity while connectors use OAuth tokens.
 
 Why **public**? The OAuth client's *backend* (e.g. Claude's servers) fetches the metadata, registers, and redeems codes at `/idp/token` with no exe.dev session — a private VM's edge would answer those with a login redirect. The design stays safe because those endpoints hand out nothing by themselves: every authorization code is minted only by `/idp/authorize`, which requires the edge-injected identity header (anonymous browsers are bounced through `/__exe.dev/login`), enforces the `--idp-users` allowlist, and shows a consent page. Codes are single-use and PKCE-bound; access tokens are short-lived ES256 JWTs carrying the resource audience; refresh tokens and client registrations are stateless signatures under `--idp-key-file`, so restarts don't strand connectors.
 

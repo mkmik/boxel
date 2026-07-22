@@ -277,6 +277,47 @@ func TestAuthMiddlewareOAuthOrStatic(t *testing.T) {
 	}
 }
 
+// The server-level guard is default-deny: every route — the hub dashboard,
+// /mcp, unknown paths, anything added in the future — requires auth unless it
+// is on the explicit OAuth-spec/self-authenticating public allowlist.
+func TestWithGuardDefaultDeny(t *testing.T) {
+	wrap, _, _, err := authLayers("sekret", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	for _, p := range []string{"GET /{$}", "/mcp", "/agents", "/vm/somevm/", "/healthz", "/idp/jwks", "/.well-known/oauth-authorization-server", "/hub/connect", "/install-agent"} {
+		mux.Handle(p, okHandler())
+	}
+	h := withGuard(wrap, mux)
+
+	get := func(path, token string) int {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// Guarded by default, including the dashboard and unregistered paths.
+	for _, p := range []string{"/", "/mcp", "/agents", "/vm/somevm/mcp", "/no-such-route"} {
+		if code := get(p, ""); code != http.StatusUnauthorized {
+			t.Errorf("GET %s unauthenticated: code %d, want 401", p, code)
+		}
+	}
+	if code := get("/", "sekret"); code != http.StatusOK {
+		t.Errorf("dashboard with auth: code %d, want 200", code)
+	}
+	// The closed public allowlist stays reachable without credentials.
+	for _, p := range []string{"/healthz", "/idp/jwks", "/.well-known/oauth-authorization-server", "/hub/connect", "/install-agent"} {
+		if code := get(p, ""); code != http.StatusOK {
+			t.Errorf("GET %s (public): code %d, want 200", p, code)
+		}
+	}
+}
+
 func TestResourceMetadataEndpoint(t *testing.T) {
 	mux := http.NewServeMux()
 	attachResourceMetadata(mux, "https://idp.example")

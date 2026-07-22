@@ -232,8 +232,11 @@ func run(o opts) error {
 		return err
 	}
 
+	// Routes are registered unguarded here; the server handler below applies
+	// the auth guard to EVERYTHING except the explicit public allowlist
+	// (withGuard), so a forgotten wrap can never expose a new route.
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", guard(handler))
+	mux.Handle("/mcp", handler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
@@ -251,7 +254,11 @@ func run(o opts) error {
 			InstallerAuth: authOK,
 			Version:       tunnel.Version,
 		})
-		hb.AttachRoutes(mux, guard)
+		// No per-route guard: withGuard already covers the dashboard,
+		// /vm/<name>/ proxy, and /agents; the registration and installer
+		// endpoints are on the public allowlist (they authenticate
+		// themselves — see isPublicPath).
+		hb.AttachRoutes(mux, nil)
 		log.Printf("hub: pull-mode multiplexer enabled: /vm/{name}/ proxy, %s registration, %s installer", hub.ConnectPath, hub.InstallerPath)
 		if o.hubAgentListen != "" {
 			amux := http.NewServeMux()
@@ -277,7 +284,7 @@ func run(o opts) error {
 		}()
 	}
 
-	hs := &http.Server{Addr: o.httpAddr, Handler: mux}
+	hs := &http.Server{Addr: o.httpAddr, Handler: withGuard(guard, mux)}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -511,6 +518,44 @@ func splitEmails(s string) []string {
 		}
 	}
 	return out
+}
+
+// isPublicPath reports whether a path must remain reachable without client
+// auth. The list is deliberately closed:
+//   - /healthz: liveness probe.
+//   - /.well-known/*: OAuth/OIDC discovery documents (RFC 8414/9728) — the
+//     spec requires clients to fetch these before they have any credential.
+//   - /idp/*: the OAuth flow endpoints. Each is self-authorizing: /authorize
+//     requires the exe.dev edge identity, /token requires a valid single-use
+//     code or refresh token, /userinfo requires an access token, /register
+//     hands out only a client_id (which grants nothing), /jwks is public key
+//     material.
+//   - the hub agent registration endpoint (authenticates agents itself) and
+//     the installer script (deliberately tokenless unless the fetch is
+//     authenticated — see hub.Config.InstallerAuth).
+//
+// Everything else — /mcp, the dashboard, /vm/<name>/, /agents, and any route
+// added in the future — is guarded by default.
+func isPublicPath(path string) bool {
+	switch path {
+	case "/healthz", hub.ConnectPath, hub.InstallerPath:
+		return true
+	}
+	return strings.HasPrefix(path, "/.well-known/") || strings.HasPrefix(path, "/idp/")
+}
+
+// withGuard applies the auth guard to every request except the public
+// allowlist. Default-deny: routes are guarded unless isPublicPath says
+// otherwise.
+func withGuard(guard func(http.Handler) http.Handler, mux http.Handler) http.Handler {
+	guarded := guard(mux)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isPublicPath(r.URL.Path) {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		guarded.ServeHTTP(w, r)
+	})
 }
 
 // requestOrigin reconstructs the external origin of a request arriving

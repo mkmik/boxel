@@ -109,6 +109,11 @@ source: the binary version is **derived from embedded build info**
   injection. exe.dev hosts **no user-facing OAuth/OIDC server** (its
   openid-configuration is a workload-identity stub; `exe-oidc-proxy` has no
   PKCE/DCR) — that's why the built-in IDP exists.
+- The HTTP guard is **default-deny at the server level** (`withGuard` in
+  cmd/tunnel-mcp): register routes unguarded on the mux; only the closed
+  `isPublicPath` allowlist (OAuth well-knowns, self-authorizing `/idp/*`,
+  `/healthz`, hub connect/installer) bypasses auth. Never re-introduce
+  per-route guard wrapping — a forgotten wrap is an exposed route.
 - The IDP runs **in-process only** (it shares the signing key with the
   resource-side `Verifier`; there is deliberately no remote-issuer mode). Its
   non-authorize endpoints (`/idp/token`, `/idp/register`, well-knowns, JWKS)

@@ -109,7 +109,7 @@ The MCP endpoint is `POST /mcp` (requires `Authorization: Bearer <token>`); `GET
 | `--hub-agent-listen` | *(disabled)* | Extra listener serving only the agent registration endpoint. |
 | `--hub-advertise-url` | *(reflection discovery / fetch URL)* | Base URL agents dial; embedded in the `/install-agent` script. |
 
-For HTTP, at least one of `--token` / `--owner-email` / `--idp-issuer` must be set — the server refuses to listen unauthenticated.
+For HTTP, at least one of `--token` / `--owner-email` / `--idp-issuer` must be set — the server refuses to listen unauthenticated. The guard is **default-deny**: every route (`/mcp`, the hub dashboard, `/vm/…`, `/agents`, even unknown paths) requires auth, except a closed allowlist of endpoints the OAuth spec needs open (`/.well-known/*`, the self-authorizing `/idp/*` flow endpoints) plus `/healthz` and the hub's self-authenticating registration/installer endpoints.
 
 ## OAuth for external tools: the built-in OIDC IDP
 
@@ -153,7 +153,10 @@ rooted in exe.dev because `/idp/authorize` is the only place codes come from,
 and it requires the edge-injected identity header (still injected on public
 VMs for logged-in visitors). This composes with the pull-mode hub: enable
 `--idp-issuer` on the hub and one OAuth connector credential covers
-`/vm/<name>/mcp` for the whole fleet. See
+`/vm/<name>/mcp` for the whole fleet. Pair it with `--owner-email` so
+browser surfaces (the dashboard, `/agents`) keep working through exe.dev
+edge identity while connectors use OAuth — the two methods are alternatives,
+either satisfies the guard. See
 [`docs/deployment.md`](docs/deployment.md) §4b for the threat model.
 
 ## Pull mode: one hub, many non-routable VMs
