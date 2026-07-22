@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "basketball-by-sky": {
+      "type": "http",
+      "url": "https://boxel.exe.xyz/vm/basketball-by-sky/mcp"
+    }
+  }
+}
