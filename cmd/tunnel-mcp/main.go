@@ -85,7 +85,7 @@ func main() {
 	flag.StringVar(&o.httpAddr, "http", "", "serve streamable HTTP MCP on this address (e.g. :8080); empty = stdio transport")
 	flag.StringVar(&o.workspace, "workspace", "", "workspace jail root; file operations outside it are denied (default: current directory)")
 	flag.StringVar(&o.permsFile, "permissions", "", "path to permissions.json (Claude Code-compatible allow/ask/deny rules)")
-	flag.StringVar(&o.mode, "permission-mode", string(policy.ModeDefault), "permission mode: default | acceptEdits | bypassPermissions (bypassPermissions is a server-side decision, never client-selectable)")
+	flag.StringVar(&o.mode, "permission-mode", string(policy.ModeDefault), "permission mode: default | acceptEdits | bypassPermissions (a server-side decision, never client-selectable). With --hub-connect the default is bypassPermissions: the agent VM is the sandbox")
 	flag.StringVar(&o.auditPath, "audit-log", "", "append-only JSONL audit log path (empty = disabled)")
 	flag.StringVar(&o.metricsAddr, "metrics-addr", "", "serve Prometheus /metrics on this address (e.g. :9090); empty = disabled")
 	flag.StringVar(&o.token, "token", "", "static bearer token required on HTTP requests (or set BOXEL_TOKEN); testing only — front with OAuth for production")
@@ -108,10 +108,36 @@ func main() {
 	flag.StringVar(&o.idpUsers, "idp-users", "", "comma-separated emails allowed to authenticate at the built-in IDP (default: --owner-email)")
 	flag.StringVar(&o.idpKeyFile, "idp-key-file", "", "path to the IDP's P-256 signing key PEM, created on first run if missing (default: <user config dir>/boxel/idp-key.pem)")
 	flag.Parse()
+	o.mode = effectiveMode(o.mode, flagWasSet("permission-mode"), o.hubConnect)
 
 	if err := run(o); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// effectiveMode resolves the permission mode after flag parsing. A pull-mode
+// agent (--hub-connect) defaults to bypassPermissions: the VM it runs on is
+// the sandbox, and the ask path depends on MCP elicitation, which common MCP
+// clients (notably Claude Code) do not support — an un-answerable ask just
+// stalls the tool call. An explicit --permission-mode always wins, and the
+// mode remains a server-side decision, never client-selectable. Hard denies
+// (workspace jail, credential paths) still apply in bypassPermissions.
+func effectiveMode(mode string, explicit, hubConnect bool) string {
+	if hubConnect && !explicit {
+		return string(policy.ModeBypassPermissions)
+	}
+	return mode
+}
+
+// flagWasSet reports whether the named flag was set on the command line.
+func flagWasSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
 }
 
 func run(o opts) error {

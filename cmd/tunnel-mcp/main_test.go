@@ -66,6 +66,30 @@ func TestStreamableHandlerAcceptsForwardedPublicHost(t *testing.T) {
 	}
 }
 
+// A pull-mode agent defaults to bypassPermissions (the agent VM is the
+// sandbox, and the ask path needs elicitation support MCP clients like Claude
+// Code lack); everything else keeps the flag default, and an explicit
+// --permission-mode always wins.
+func TestEffectiveMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode       string
+		explicit   bool
+		hubConnect bool
+		want       string
+	}{
+		{"default", false, true, "bypassPermissions"},
+		{"default", false, false, "default"},
+		{"default", true, true, "default"},
+		{"acceptEdits", true, true, "acceptEdits"},
+		{"bypassPermissions", true, false, "bypassPermissions"},
+	} {
+		if got := effectiveMode(tc.mode, tc.explicit, tc.hubConnect); got != tc.want {
+			t.Errorf("effectiveMode(%q, explicit=%v, hubConnect=%v) = %q, want %q",
+				tc.mode, tc.explicit, tc.hubConnect, got, tc.want)
+		}
+	}
+}
+
 func TestAuthMiddlewareRefusesUnauthenticated(t *testing.T) {
 	if _, _, _, err := authLayers("", "", nil); err == nil {
 		t.Fatal("expected error when no auth is configured")

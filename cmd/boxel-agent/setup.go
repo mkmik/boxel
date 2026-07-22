@@ -31,6 +31,10 @@ const (
 	targetTokenPath = "/etc/boxel-agent/target-token"
 )
 
+// The unit deliberately carries no systemd sandboxing (ProtectSystem &
+// friends): boxel agents run on VMs that are themselves the sandbox, so
+// systemd-level confinement only gets in the way of the tools the agent
+// fronts.
 const systemdUnit = `[Unit]
 Description=boxel pull-mode agent (reverse tunnel to the boxel hub)
 After=network-online.target
@@ -43,16 +47,6 @@ EnvironmentFile=/etc/boxel-agent/env
 ExecStart=/usr/local/bin/boxel-agent
 Restart=always
 RestartSec=2
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-LockPersonality=true
-MemoryDenyWriteExecute=true
 
 [Install]
 WantedBy=multi-user.target
