@@ -55,7 +55,9 @@ type Config struct {
 	// portless mode: the process that owns the MCP mux dials the hub and serves
 	// its own handler over the reverse channel, so no local HTTP port (and no
 	// second process) is needed. When Handler is set, Target and TargetToken
-	// are ignored.
+	// are ignored. The agent reserves GET / for its own status dashboard
+	// (reachable through the hub at /vm/<name>/); all other requests go to
+	// Handler.
 	Handler http.Handler
 	// Target is the local base URL proxied requests are forwarded to. Used only
 	// when Handler is nil.
@@ -106,9 +108,12 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 	var handler http.Handler
+	var dash *dashboard
 	if cfg.Handler != nil {
-		// Portless in-process mode: serve the caller's handler directly.
-		handler = cfg.Handler
+		// Portless in-process mode: serve the caller's handler, with the
+		// agent's own status dashboard on GET /.
+		dash = newDashboard(cfg, cfg.Handler)
+		handler = dash
 	} else {
 		target, err := url.Parse(cfg.Target)
 		if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
@@ -122,7 +127,7 @@ func Run(ctx context.Context, cfg Config) error {
 	var lastLogged time.Time
 	for {
 		start := time.Now()
-		err := connectCycle(ctx, cfg, handler)
+		err := connectCycle(ctx, cfg, handler, dash)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -161,7 +166,7 @@ func validateBaseURL(s string) error {
 // configured) and runs one dial → register → serve cycle. Discovery happens
 // every cycle so a hub integration attached after the agent boots is picked
 // up on the next retry.
-func connectCycle(ctx context.Context, cfg Config, handler http.Handler) error {
+func connectCycle(ctx context.Context, cfg Config, handler http.Handler, dash *dashboard) error {
 	hubURL := cfg.HubURL
 	if hubURL == "" {
 		discovered, err := DiscoverHubURL(ctx, cfg.ReflectionURL, cfg.HubIntegration)
@@ -174,6 +179,9 @@ func connectCycle(ctx context.Context, cfg Config, handler http.Handler) error {
 	u, err := url.Parse(hubURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("invalid hub URL %q", hubURL)
+	}
+	if dash != nil {
+		dash.setHubURL(hubURL)
 	}
 	return runOnce(ctx, cfg, u, handler)
 }

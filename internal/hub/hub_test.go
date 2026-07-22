@@ -208,13 +208,25 @@ func TestPullModeInProcessHandler(t *testing.T) {
 
 	h, ts := startHub(t, hub.Config{AgentToken: "tok"})
 	startAgent(t, hubagent.Config{
-		HubURL: ts.URL, Token: "tok", Name: "inproc",
+		HubURL: ts.URL, Token: "tok", Name: "inproc", Version: "v9.9.9",
 		Handler: inproc, // no Target: served in-process, no loopback
 	})
 	waitRegistered(t, h, "inproc", time.Time{})
 
 	if code, body := get(t, ts.URL+"/vm/inproc/healthz"); code != http.StatusOK || body != "ok" {
 		t.Fatalf("healthz via in-process agent: code %d, body %q", code, body)
+	}
+
+	// The agent answers / itself with its status dashboard: version and a
+	// link back to the hub.
+	code, body := get(t, ts.URL+"/vm/inproc/")
+	if code != http.StatusOK {
+		t.Fatalf("agent dashboard: code %d, body %q", code, body)
+	}
+	for _, want := range []string{"boxel agent", "inproc", "v9.9.9", `href="` + ts.URL + `"`, `href="../.."`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("agent dashboard missing %q; body:\n%s", want, body)
+		}
 	}
 	resp, err := http.Post(ts.URL+"/vm/inproc/mcp", "application/json", strings.NewReader(`{"hi":1}`))
 	if err != nil {
