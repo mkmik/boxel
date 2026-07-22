@@ -389,6 +389,13 @@ func TestInstallerTokenEmbedding(t *testing.T) {
 			t.Errorf("installer script missing %q", want)
 		}
 	}
+	// The agent unit is deliberately not systemd-sandboxed: the VM is the
+	// sandbox, and confinement directives break the tools the agent runs.
+	for _, banned := range []string{"ProtectSystem=", "ProtectHome=", "NoNewPrivileges=", "ReadWritePaths=", "MemoryDenyWriteExecute="} {
+		if strings.Contains(body, banned) {
+			t.Errorf("installer script reintroduces systemd sandboxing directive %q", banned)
+		}
+	}
 
 	// Authenticated: token embedded.
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+hub.InstallerPath, nil)

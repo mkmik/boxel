@@ -188,10 +188,14 @@ The hub-served script installs the **single-process** agent:
 2. creates a `boxel-agent` system user, `/etc/boxel-agent/env`, and a jailed
    workspace (default `/var/lib/boxel-agent/work`, override with
    `BOXEL_WORKSPACE`);
-3. installs and starts a sandboxed systemd unit (`boxel-agent.service`)
-   running `tunnel-mcp --hub-connect --workspace <workspace>`: **one**
-   process that dials the hub and serves this VM's MCP in-process — no
-   local port, no separate forwarder;
+3. installs and starts a systemd unit (`boxel-agent.service`) running
+   `tunnel-mcp --hub-connect --workspace <workspace>`: **one** process that
+   dials the hub and serves this VM's MCP in-process — no local port, no
+   separate forwarder. The unit deliberately has **no systemd sandboxing**
+   and the agent defaults to **`bypassPermissions`**: the VM itself is the
+   sandbox, and permission asks would stall on MCP clients without
+   elicitation support (pass `--permission-mode` explicitly to opt back
+   into prompting);
 4. installs a self-update pair (`boxel-agent-update.service` +
    `boxel-agent-update.timer`): every 5 minutes the timer rebuilds
    `tunnel-mcp@latest` and, when the binary actually changes, atomically
@@ -226,7 +230,9 @@ sudo /usr/local/bin/boxel-agent setup
 2. creates a `boxel-agent` system user and `/etc/boxel-agent/env`;
 3. if `/etc/tunnel-mcp/token` exists, copies it so forwarded requests
    authenticate to the local boxel instance automatically;
-4. installs and starts a hardened systemd unit (`boxel-agent.service`);
+4. installs and starts a systemd unit (`boxel-agent.service`; like the
+   hub-served installer, deliberately not systemd-sandboxed — the VM is the
+   sandbox);
 5. installs a self-update pair (`boxel-agent-update.service` +
    `boxel-agent-update.timer`): every 5 minutes the timer runs
    `boxel-agent update`, which asks the Go module proxy for the latest

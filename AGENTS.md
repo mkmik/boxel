@@ -79,12 +79,22 @@ source: the binary version is **derived from embedded build info**
   in `bypassPermissions`**. `bypassPermissions` is server-flag-only and must
   never become client-selectable. "Allow always" from an elicitation writes to
   a session-scoped overlay, never the persistent permissions file.
+  A pull-mode agent (`--hub-connect`) **defaults to `bypassPermissions`**
+  (still a server-side decision, applied in `main` via `effectiveMode`; an
+  explicit `--permission-mode` wins): the agent VM is the sandbox, and the ask
+  path needs MCP elicitation, which the Claude Code MCP client does not
+  support — asks would just stall. Don't revert this to `default`.
 - **Security stance:** `invoke` is authenticated RCE by construction.
   Authentication is the primary boundary; the permission engine is
   defense-in-depth/UX. The HTTP transport **refuses to start without auth**
   (`--token` and/or `--owner-email`) — never weaken that. `Bash` is
   deliberately not jail-checked (a command carries no path); containment is
-  OS-level sandboxing + egress deny, documented in `docs/deployment.md`.
+  the machine boundary. On fleet VMs the **whole VM is the sandbox**: the
+  agent units written by `/install-agent` and `boxel-agent setup` carry **no
+  systemd sandboxing** (don't reintroduce `ProtectSystem` & friends — a
+  hub_test.go assertion guards this). The hardened unit in
+  `docs/deployment.md` remains the recipe for hosts that are worth
+  protecting.
 - **Audit log:** every mutation is logged with an input digest and decision;
   **file contents are never logged**; sensitive Bash command lines are
   redacted.

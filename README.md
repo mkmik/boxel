@@ -95,7 +95,7 @@ The MCP endpoint is `POST /mcp` (requires `Authorization: Bearer <token>`); `GET
 | `--http` | *(empty → stdio)* | Serve streamable HTTP on this address. |
 | `--workspace` | current dir | Workspace jail root; file ops outside it are hard-denied. |
 | `--permissions` | *(none)* | Path to `permissions.json` (Claude Code-compatible rules). |
-| `--permission-mode` | `default` | `default` \| `acceptEdits` \| `bypassPermissions`. |
+| `--permission-mode` | `default` (`bypassPermissions` with `--hub-connect`) | `default` \| `acceptEdits` \| `bypassPermissions`. Pull-mode agents default to `bypassPermissions` — the agent VM is the sandbox, and the ask path needs elicitation support common MCP clients (e.g. Claude Code) lack. An explicit flag always wins. |
 | `--audit-log` | *(disabled)* | Append-only JSONL audit log path. |
 | `--metrics-addr` | *(disabled)* | Serve Prometheus `/metrics` on this address. |
 | `--token` / `--token-file` | `$BOXEL_TOKEN` | Static bearer token for HTTP (testing; front with OAuth for production). |
@@ -253,9 +253,14 @@ curl -fsSL http://boxel.int.exe.xyz/install-agent | sudo bash
 The script installs a **single-process** agent: it builds `tunnel-mcp`,
 creates a `boxel-agent` system user with a jailed workspace
 (`/var/lib/boxel-agent/work` by default, override with `BOXEL_WORKSPACE`),
-and enables a sandboxed `boxel-agent.service` running
+and enables a `boxel-agent.service` running
 `tunnel-mcp --hub-connect` — one process that dials the hub and serves this
-VM's MCP in-process, with no local port and no separate forwarder — plus a
+VM's MCP in-process, with no local port and no separate forwarder. The unit
+deliberately carries **no systemd sandboxing** and the agent runs in
+**`bypassPermissions`** mode by default: the VM itself is the sandbox, and
+permission prompts would stall anyway on MCP clients without elicitation
+support (add `--permission-mode` to the unit's `ExecStart` to opt back into
+prompting). The script also installs a
 `boxel-agent-update.timer` that polls the Go module proxy every 5 minutes
 and automatically installs newer releases. The install succeeds even while
 the hub is unreachable: the service autodiscovers and retries until the
@@ -327,9 +332,9 @@ Rules use Claude Code's `settings.json` format. Precedence is **deny > ask > all
 - `Edit(/home/agent/work/**)` — doublestar glob over the resolved absolute path.
 - `Read(**)` — any path (still subject to the jail + credential hard denies).
 
-**Modes:** `default` asks on any unmatched mutating call; `acceptEdits` auto-approves `Write`/`Edit` inside the jail; `bypassPermissions` is audit-only and **server-flag only, never client-selectable**.
+**Modes:** `default` asks on any unmatched mutating call; `acceptEdits` auto-approves `Write`/`Edit` inside the jail; `bypassPermissions` is audit-only and **server-flag only, never client-selectable**. A pull-mode agent (`--hub-connect`) defaults to `bypassPermissions` — the agent VM is the sandbox — unless `--permission-mode` is set explicitly.
 
-**Ask path:** an "ask" decision issues an [MCP elicitation](https://modelcontextprotocol.io/) — `allow once` / `allow always` / `deny`. "Allow always" appends a rule to a **session-scoped overlay**, never the persistent file.
+**Ask path:** an "ask" decision issues an [MCP elicitation](https://modelcontextprotocol.io/) — `allow once` / `allow always` / `deny`. "Allow always" appends a rule to a **session-scoped overlay**, never the persistent file. Elicitation requires client support; clients without it (the Claude Code MCP client, currently) cannot answer an ask, which is why pull-mode agents default to `bypassPermissions`.
 
 **Hard denies (always, even in `bypassPermissions`):**
 - Paths outside the workspace jail.
@@ -340,7 +345,7 @@ Rules use Claude Code's `settings.json` format. Precedence is **deny > ask > all
 The generic `invoke` op is, by construction, an **authenticated RCE endpoint** — treat the whole design as "authenticated RCE with policy," not a typed API. **Authentication is the primary boundary; the permission engine is defense-in-depth and UX.** Deploy accordingly:
 
 - Front the HTTP transport with a TLS-terminating tunnel, and authenticate clients with OAuth — the built-in OIDC IDP (`--idp-issuer`) or the fronting layer's SSO. The built-in bearer token is a second factor and a local-testing convenience, not the production auth story.
-- Run the server as a dedicated **unprivileged** user, with the workspace on its own path and OS-level isolation (systemd sandboxing / bubblewrap / landlock).
+- Run the server as a dedicated **unprivileged** user, with the workspace on its own path and OS-level isolation (systemd sandboxing / bubblewrap / landlock) — *when the host machine is worth protecting*. Fleet agents installed via `/install-agent` deliberately skip systemd sandboxing and run `bypassPermissions`: there the entire disposable VM is the isolation boundary.
 - Deny-by-default egress from the sandbox user (e.g. nftables per-UID) with a registry/GitHub allowlist, to bound exfiltration if a prompt-injected session goes rogue.
 - Every mutation is recorded in the audit log with an input digest and the permission decision; **file contents are never logged**, and Bash command lines flagged sensitive are redacted.
 

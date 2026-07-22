@@ -69,7 +69,9 @@ var installerTmpl = template.Must(template.New("installer").Parse(`#!/usr/bin/en
 #   - registers and starts a systemd unit (boxel-agent.service) running
 #     'tunnel-mcp --hub-connect': the process dials OUT to the hub and serves
 #     its MCP in-process over the reverse channel — no local port, no
-#     separate boxel-agent forwarder process
+#     separate boxel-agent forwarder process. The unit carries no systemd
+#     sandboxing and the agent defaults to bypassPermissions: the VM is the
+#     sandbox
 #   - enables a self-update timer (boxel-agent-update.timer) that polls for
 #     newer releases every 5 minutes and installs them
 # The VM then becomes reachable at {{.PublicURL}}/vm/<hostname>/
@@ -151,18 +153,9 @@ ExecStart=/usr/local/bin/tunnel-mcp --hub-connect --workspace $WORKSPACE
 Restart=always
 RestartSec=2
 
-# OS-level sandboxing. The workspace (and the service home, for tool caches)
-# stays writable; MemoryDenyWriteExecute is deliberately absent so JIT-based
-# dev tools keep working inside the workspace.
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=/var/lib/boxel-agent $WORKSPACE
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-LockPersonality=true
+# Deliberately NO systemd sandboxing (ProtectSystem & friends): the whole VM
+# is the sandbox. The agent runs in bypassPermissions mode by default, and
+# dev tools must be free to use the entire machine.
 
 [Install]
 WantedBy=multi-user.target

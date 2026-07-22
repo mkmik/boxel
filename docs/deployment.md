@@ -75,6 +75,8 @@ WantedBy=multi-user.target
 
 Note the server binds `127.0.0.1` only — it is never directly reachable from the network. The tunnel (next step) is the sole public entry point.
 
+The sandboxing block above is for hosts that are worth protecting (a laptop, a shared server). On a **disposable, single-purpose VM the whole machine is the sandbox** — the fleet installer (`/install-agent`) and `boxel-agent setup` deliberately write units with no systemd sandboxing, and the pull-mode agent defaults to `--permission-mode bypassPermissions`.
+
 ```sh
 sudo systemctl daemon-reload
 sudo systemctl enable --now tunnel-mcp
