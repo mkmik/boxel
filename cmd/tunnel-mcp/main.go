@@ -31,6 +31,7 @@ import (
 
 	"github.com/mkmik/boxel/internal/audit"
 	"github.com/mkmik/boxel/internal/hub"
+	"github.com/mkmik/boxel/internal/hubagent"
 	"github.com/mkmik/boxel/internal/metrics"
 	"github.com/mkmik/boxel/internal/policy"
 	"github.com/mkmik/boxel/internal/session"
@@ -55,6 +56,15 @@ type opts struct {
 	hubAgentOwnerEmail string
 	hubAgentListen     string
 	hubAdvertiseURL    string
+
+	// Pull-mode agent (dial OUT to a hub, serve MCP in-process; no local port).
+	hubConnect     bool
+	hubURL         string
+	hubName        string
+	hubToken       string
+	hubTokenFile   string
+	hubIntegration string
+	reflectionURL  string
 }
 
 func main() {
@@ -74,6 +84,13 @@ func main() {
 	flag.StringVar(&o.hubAgentOwnerEmail, "hub-agent-owner-email", "", "enable the pull-mode hub with exe.dev identity registration: accept a registration when the X-ExeDev-Email header (injected by the exe.dev edge for peer-integration traffic) equals this address; the platform-verified X-Exedev-Source-Vm header then names the agent. Composes with --hub-agent-token as an alternative method. Bind --http to localhost so the edge is the only path in.")
 	flag.StringVar(&o.hubAgentListen, "hub-agent-listen", "", "additionally serve the agent registration endpoint ("+hub.ConnectPath+") on this address, reachable by agent VMs over the internal network (e.g. :8081)")
 	flag.StringVar(&o.hubAdvertiseURL, "hub-advertise-url", "", "base URL agents should dial to reach this hub (internal VM-to-VM address, e.g. http://boxel.internal:8081); embedded in the "+hub.InstallerPath+" script")
+	flag.BoolVar(&o.hubConnect, "hub-connect", false, "act as a pull-mode agent: dial OUT to a hub and serve THIS instance's MCP over the reverse channel, in-process. No --http listener or local port is needed; the hub reaches it at /vm/<name>/mcp. Composes with --http if a direct listener is also wanted.")
+	flag.StringVar(&o.hubURL, "hub-url", os.Getenv("BOXEL_HUB_URL"), "with --hub-connect: base URL of the hub to dial (or BOXEL_HUB_URL); empty = autodiscover the hub's peer integration via exe.dev reflection")
+	flag.StringVar(&o.hubName, "hub-name", os.Getenv("BOXEL_AGENT_NAME"), "with --hub-connect: handle to register under, becomes the /vm/<name>/ path (default: this VM's short hostname)")
+	flag.StringVar(&o.hubToken, "hub-token", "", "with --hub-connect: registration bearer token to present to the hub (or BOXEL_AGENT_TOKEN); not needed on exe.dev identity hubs")
+	flag.StringVar(&o.hubTokenFile, "hub-token-file", os.Getenv("BOXEL_AGENT_TOKEN_FILE"), "with --hub-connect: read the registration token from this file")
+	flag.StringVar(&o.hubIntegration, "hub-integration", os.Getenv("BOXEL_HUB_INTEGRATION"), "with --hub-connect: hub peer-integration name to autodiscover via reflection (default boxel-hub)")
+	flag.StringVar(&o.reflectionURL, "hub-reflection-url", os.Getenv("BOXEL_REFLECTION_URL"), "with --hub-connect: exe.dev reflection base URL for autodiscovery (default https://reflection.int.exe.xyz)")
 	flag.Parse()
 
 	if err := run(o); err != nil {
@@ -154,6 +171,21 @@ func run(o opts) error {
 	}
 	hubEnabled := hubToken != "" || o.hubAgentOwnerEmail != ""
 
+	// The streamable MCP handler is shared by every transport below (the direct
+	// --http listener and the in-process pull-mode agent), so sessions are
+	// consistent regardless of how a request arrives.
+	handler := newStreamableHandler(srv)
+
+	// Portless pull-mode agent: no --http listener, so serve MCP in-process
+	// straight over the reverse channel to the hub. No local port, no second
+	// process, no loopback.
+	if o.hubConnect && o.httpAddr == "" {
+		if hubEnabled {
+			return fmt.Errorf("--hub-connect is the agent side; hub-server mode (--hub-agent-*) needs --http — don't combine them without a listener")
+		}
+		return runHubAgent(ctx, o, handler, workspace)
+	}
+
 	if o.httpAddr == "" {
 		if hubEnabled {
 			return fmt.Errorf("the pull-mode hub requires the HTTP transport: pass --http")
@@ -167,7 +199,6 @@ func run(o opts) error {
 	if err != nil {
 		return err
 	}
-	handler := newStreamableHandler(srv)
 	guard, authOK, authDesc, err := authLayers(bearer, o.ownerEmail)
 	if err != nil {
 		return err
@@ -204,6 +235,15 @@ func run(o opts) error {
 		}
 	}
 
+	// Optionally ALSO dial out to a hub while serving the direct listener.
+	if o.hubConnect {
+		go func() {
+			if err := runHubAgent(ctx, o, handler, workspace); err != nil && ctx.Err() == nil {
+				log.Printf("hub-connect: %v", err)
+			}
+		}()
+	}
+
 	hs := &http.Server{Addr: o.httpAddr, Handler: mux}
 	go func() {
 		<-ctx.Done()
@@ -216,6 +256,61 @@ func run(o opts) error {
 		return err
 	}
 	return nil
+}
+
+// runHubAgent dials the hub and serves this instance's MCP mux in-process over
+// the reverse channel — no local listener. The hub is the auth boundary (it
+// guards /vm/<name>/ with its own client auth), so the in-process /mcp is
+// served without the direct-listener guard, mirroring how a forward-mode local
+// instance trusts requests arriving from its co-located agent.
+func runHubAgent(ctx context.Context, o opts, mcpHandler http.Handler, workspace string) error {
+	name := o.hubName
+	if name == "" {
+		h, err := os.Hostname()
+		if err != nil {
+			return fmt.Errorf("cannot derive agent name from hostname (%w); pass --hub-name", err)
+		}
+		name, _, _ = strings.Cut(h, ".")
+		name = strings.ToLower(name)
+	}
+	token, err := resolveAgentToken(o.hubToken, o.hubTokenFile)
+	if err != nil {
+		return err
+	}
+
+	am := http.NewServeMux()
+	am.Handle("/mcp", mcpHandler)
+	am.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "ok")
+	})
+
+	log.Printf("tunnel-mcp %s: pull-mode agent — dialing hub, serving MCP in-process as %q (no local port), workspace %s, mode %s",
+		tunnel.Version, name, workspace, o.mode)
+	return hubagent.Run(ctx, hubagent.Config{
+		HubURL:         o.hubURL,
+		HubIntegration: o.hubIntegration,
+		ReflectionURL:  o.reflectionURL,
+		Token:          token,
+		Name:           name,
+		Handler:        am,
+		Version:        tunnel.Version,
+	})
+}
+
+// resolveAgentToken picks the hub registration token from, in order: the flag,
+// a file, then BOXEL_AGENT_TOKEN.
+func resolveAgentToken(token, tokenFile string) (string, error) {
+	if token != "" {
+		return token, nil
+	}
+	if tokenFile != "" {
+		b, err := os.ReadFile(tokenFile)
+		if err != nil {
+			return "", fmt.Errorf("read hub token file: %w", err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	return os.Getenv("BOXEL_AGENT_TOKEN"), nil
 }
 
 // newStreamableHandler builds the streamable HTTP MCP handler.

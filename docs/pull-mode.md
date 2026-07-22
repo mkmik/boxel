@@ -38,6 +38,35 @@ connected, since when, and how many messages the mux proxied to it. The same
 data is available as JSON at `/agents`. Both endpoints sit behind the hub's
 client auth.
 
+## Two ways to serve the agent side
+
+The diagram shows the **forward** mode: a standalone `boxel-agent` process dials
+the hub and forwards proxied requests over loopback to a *separate* local HTTP
+server (`127.0.0.1:8080`). That server can be a `tunnel-mcp` instance **or any
+HTTP app** — the agent is content-agnostic, so the same binary can expose a web
+app, a notebook, whatever is on that port.
+
+When the thing you want to expose is boxel's own MCP, the loopback hop and the
+second process are avoidable. `tunnel-mcp --hub-connect` dials the hub and
+serves its **own MCP mux in-process** over the reverse channel — no local port,
+no `boxel-agent`, no local-token injection, and no "nothing listening on 8080 →
+502" failure mode:
+
+```sh
+tunnel-mcp \
+  --workspace /home/agent/work \
+  --owner-email you@example.com \
+  --hub-connect                 # dial out; no --http, no local listener
+  # --hub-url / --hub-name / --hub-token optional; defaults = autodiscover + hostname
+```
+
+`--hub-connect` also composes with `--http` if a VM wants *both* a direct
+listener and a hub registration. Pick forward mode (`boxel-agent`) to front an
+arbitrary local app; pick `--hub-connect` for the common "expose this VM's MCP
+through the hub" case. Either way the hub is the auth boundary — it guards
+`/vm/<name>/` with its client auth, so the in-process `/mcp` needs no second
+credential.
+
 ## How the reverse channel works
 
 The agent sends `GET /hub/connect` with `Upgrade: boxel-h2c`, gets back a

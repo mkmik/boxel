@@ -241,7 +241,10 @@ The VM's own public hostname stays free: `ssh exe.dev share port SOME_VM
 | agent logs `hub autodiscovery: no http-proxy integration named "boxel"` | VM not tagged (step 3) or integration missing (step 2). Discovery retries every backoff cycle, so fixing the tag is enough. |
 | agent logs `hub refused registration: 401` | Hub not started with `--hub-agent-owner-email`, or its value doesn't match the account that owns the VMs. |
 | agent registers, then the channel drops immediately after the 101 | An intermediary isn't passing the `Upgrade: boxel-h2c` handshake through — report it. |
-| `/vm/<name>/…` returns 502 `vm_not_connected` | Agent not running/registered on that VM — check step 4. |
+| `/vm/<name>/…` returns 502 `vm_not_connected` (JSON body) | Agent not running/registered on that VM — check step 4. |
+| `/vm/<name>/…` returns 502 `agent_forward_failed` (JSON body) | Agent is connected but can't reach its **local** forward target: nothing is listening on `--target` (default `127.0.0.1:8080`), or it's on a different port. Start the local server, or fix `--target`. |
+| `/vm/<name>/…` returns 502 with an **empty** body | An older agent (before the diagnostic endpoint) failing to forward — same cause as `agent_forward_failed`. Upgrade `boxel-agent` to get the explanatory body. |
+| unsure whether it's the channel or the local target | Hit `GET /vm/<name>/__boxel-agent` — the agent answers this path **itself** (never forwarded), returning its name/version/`--target` and a live `target_check` reachability probe. A 200 here with `target_check.reachable: false` means the channel is up and the local target is down. |
 | proxied requests get 401 from the *local* boxel | The agent isn't injecting the local token: ensure `/etc/boxel-agent/target-token` exists (rerun the installer after creating `/etc/tunnel-mcp/token`) or set `BOXEL_AGENT_TARGET_TOKEN_FILE` in `/etc/boxel-agent/env` and restart `boxel-agent`. |
 
 Full details (generic token-based deployments, security model, design notes):
