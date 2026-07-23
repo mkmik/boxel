@@ -26,24 +26,28 @@ const (
 	updateUnitPath  = "/etc/systemd/system/boxel-agent-update.service"
 	updateTimerPath = "/etc/systemd/system/boxel-agent-update.timer"
 	updateTimerName = "boxel-agent-update.timer"
-	serviceUser     = "boxel-agent"
-	localTokenPath  = "/etc/tunnel-mcp/token"
-	targetTokenPath = "/etc/boxel-agent/target-token"
+	// The agent runs as the VM's main user (its natural home dir and all),
+	// not a dedicated service user: the whole VM is the sandbox anyway.
+	defaultServiceUser = "exedev"
+	localTokenPath     = "/etc/tunnel-mcp/token"
+	targetTokenPath    = "/etc/boxel-agent/target-token"
 )
 
 // The unit deliberately carries no systemd sandboxing (ProtectSystem &
 // friends): boxel agents run on VMs that are themselves the sandbox, so
 // systemd-level confinement only gets in the way of the tools the agent
-// fronts.
-const systemdUnit = `[Unit]
+// fronts. %[1]s is the service user, %[2]s its home directory (systemd does
+// not reliably export HOME for User= system services, so set it explicitly).
+const systemdUnitTmpl = `[Unit]
 Description=boxel pull-mode agent (reverse tunnel to the boxel hub)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=boxel-agent
-Group=boxel-agent
+User=%[1]s
 EnvironmentFile=/etc/boxel-agent/env
+Environment=HOME=%[2]s
+WorkingDirectory=%[2]s
 ExecStart=/usr/local/bin/boxel-agent
 Restart=always
 RestartSec=2
@@ -82,9 +86,11 @@ WantedBy=timers.target
 `
 
 // runSetup implements `boxel-agent setup`: a self-contained, hub-independent
-// installer. It copies the running binary to /usr/local/bin, creates the
-// service user, writes /etc/boxel-agent/env, and enables the systemd unit
-// plus a timer that polls for and installs agent updates every 5 minutes.
+// installer. It copies the running binary to /usr/local/bin, configures the
+// service to run as the VM's main user (default exedev) with that user's
+// natural home directory, writes /etc/boxel-agent/env, and enables the
+// systemd unit plus a timer that polls for and installs agent updates every
+// 5 minutes.
 // It deliberately succeeds even when the hub is not reachable yet (e.g. the
 // exe.dev peer integration has not been created or attached): the service
 // retries discovery and registration forever, so setup finishes by telling
@@ -97,6 +103,7 @@ func runSetup(args []string) error {
 	token := fs.String("token", os.Getenv("BOXEL_AGENT_TOKEN"), "registration bearer token (or BOXEL_AGENT_TOKEN); not needed with exe.dev identity registration")
 	name := fs.String("name", os.Getenv("BOXEL_AGENT_NAME"), "handle to register under (or BOXEL_AGENT_NAME; default: short hostname)")
 	target := fs.String("target", os.Getenv("BOXEL_AGENT_TARGET"), "local base URL to forward to (or BOXEL_AGENT_TARGET; default http://127.0.0.1:8080)")
+	svcUser := fs.String("user", os.Getenv("BOXEL_AGENT_USER"), "existing user to run the service as (or BOXEL_AGENT_USER; default exedev — the VM's main user)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -117,16 +124,19 @@ func runSetup(args []string) error {
 	if *target == "" {
 		*target = "http://127.0.0.1:8080"
 	}
+	if *svcUser == "" {
+		*svcUser = defaultServiceUser
+	}
+	home, gid, err := lookupServiceUser(*svcUser)
+	if err != nil {
+		return err
+	}
 
 	fmt.Printf("==> installing %s\n", binPath)
 	if err := installSelf(); err != nil {
 		return err
 	}
-	fmt.Printf("==> creating service user %q and %s\n", serviceUser, etcDir)
-	gid, err := ensureServiceUser()
-	if err != nil {
-		return err
-	}
+	fmt.Printf("==> configuring service to run as %q (home %s) and writing %s\n", *svcUser, home, etcDir)
 	if err := os.MkdirAll(etcDir, 0o750); err != nil {
 		return err
 	}
@@ -149,7 +159,7 @@ func runSetup(args []string) error {
 
 	fmt.Printf("==> installing and starting %s (with self-update timer %s)\n", unitName, updateTimerName)
 	for _, u := range []struct{ path, content string }{
-		{unitPath, systemdUnit},
+		{unitPath, fmt.Sprintf(systemdUnitTmpl, *svcUser, home)},
 		{updateUnitPath, updateServiceUnit},
 		{updateTimerPath, updateTimerUnit},
 	} {
@@ -275,22 +285,19 @@ func installSelf() error {
 	return os.Rename(tmp.Name(), binPath)
 }
 
-// ensureServiceUser creates the boxel-agent system user (and group) if
-// missing and returns the group id.
-func ensureServiceUser() (gid int, err error) {
-	if _, err := user.Lookup(serviceUser); err != nil {
-		out, err := exec.Command("useradd", "--system", "--user-group",
-			"--no-create-home", "--home-dir", "/nonexistent",
-			"--shell", "/usr/sbin/nologin", serviceUser).CombinedOutput()
-		if err != nil {
-			return 0, fmt.Errorf("useradd %s: %w: %s", serviceUser, err, strings.TrimSpace(string(out)))
-		}
-	}
-	g, err := user.LookupGroup(serviceUser)
+// lookupServiceUser resolves the existing user the service runs as — the
+// VM's main user, never one created by this installer — returning its home
+// directory and primary group id.
+func lookupServiceUser(name string) (home string, gid int, err error) {
+	u, err := user.Lookup(name)
 	if err != nil {
-		return 0, fmt.Errorf("group %s not found after useradd: %w", serviceUser, err)
+		return "", 0, fmt.Errorf("user %q not found (the agent runs as the VM's main user; pass --user or BOXEL_AGENT_USER): %w", name, err)
 	}
-	return strconv.Atoi(g.Gid)
+	gid, err = strconv.Atoi(u.Gid)
+	if err != nil {
+		return "", 0, fmt.Errorf("user %q has non-numeric gid %q: %w", name, u.Gid, err)
+	}
+	return u.HomeDir, gid, nil
 }
 
 func writeOwnedFile(path string, data []byte, perm os.FileMode, gid int) error {

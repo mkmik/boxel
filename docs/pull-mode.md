@@ -225,8 +225,10 @@ curl -fsSL https://<hub>/install-agent | sudo bash                  # generic
 The hub-served script installs the **single-process** agent:
 
 1. builds `tunnel-mcp` with `go install` into `/usr/local/bin`;
-2. creates a `boxel-agent` system user, `/etc/boxel-agent/env`, and a jailed
-   workspace (default `/var/lib/boxel-agent/work`, override with
+2. configures the service to run as the VM's **main user** (default
+   `exedev`, override with `BOXEL_AGENT_USER`; no dedicated service user is
+   created), writes `/etc/boxel-agent/env`, and uses that user's natural
+   home directory as `HOME` and workspace jail (override with
    `BOXEL_WORKSPACE`);
 3. installs and starts a systemd unit (`boxel-agent.service`) running
    `tunnel-mcp --hub-connect --workspace <workspace>`: **one** process that
@@ -251,7 +253,7 @@ when the installer request itself carried the hub's client credentials; in
 identity mode there is no token at all, so any copy of the script is safe.
 Everything is overridable at install time via `BOXEL_HUB_URL`,
 `BOXEL_HUB_INTEGRATION`, `BOXEL_AGENT_TOKEN`, `BOXEL_AGENT_NAME`,
-`BOXEL_WORKSPACE`.
+`BOXEL_AGENT_USER`, `BOXEL_WORKSPACE`.
 
 ### Forward mode: `boxel-agent setup`
 
@@ -267,7 +269,9 @@ sudo /usr/local/bin/boxel-agent setup
 `boxel-agent setup`:
 
 1. copies the binary to `/usr/local/bin/boxel-agent`;
-2. creates a `boxel-agent` system user and `/etc/boxel-agent/env`;
+2. configures the service to run as the VM's main user (default `exedev`,
+   override with `--user` / `BOXEL_AGENT_USER`) in that user's home
+   directory, and writes `/etc/boxel-agent/env`;
 3. if `/etc/tunnel-mcp/token` exists, copies it so forwarded requests
    authenticate to the local boxel instance automatically;
 4. installs and starts a systemd unit (`boxel-agent.service`; like the
