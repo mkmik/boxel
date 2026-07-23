@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Run on merge-queue branches so a required "build & test" check can
+  # complete inside a merge queue instead of deadlocking it.
+  merge_group:
 
 permissions:
   contents: read
