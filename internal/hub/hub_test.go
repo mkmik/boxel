@@ -384,7 +384,7 @@ func TestInstallerTokenEmbedding(t *testing.T) {
 	if strings.Contains(body, "sekrit-token") {
 		t.Error("unauthenticated installer leaked the agent token")
 	}
-	for _, want := range []string{"#!/usr/bin/env bash", "http://boxel.internal:8081", "go install", "cmd/tunnel-mcp", "--hub-connect"} {
+	for _, want := range []string{"#!/usr/bin/env bash", "http://boxel.internal:8081", "go install", "cmd/tunnel-mcp", "--hub-connect", `SERVICE_USER="${BOXEL_AGENT_USER:-exedev}"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("installer script missing %q", want)
 		}
@@ -395,6 +395,11 @@ func TestInstallerTokenEmbedding(t *testing.T) {
 		if strings.Contains(body, banned) {
 			t.Errorf("installer script reintroduces systemd sandboxing directive %q", banned)
 		}
+	}
+	// The agent runs as the VM's main user in its natural home dir; the
+	// installer must not create a dedicated service user.
+	if strings.Contains(body, "useradd") {
+		t.Error("installer script reintroduces a dedicated service user (useradd)")
 	}
 
 	// Authenticated: token embedded.

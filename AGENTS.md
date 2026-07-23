@@ -172,6 +172,11 @@ source: the binary version is **derived from embedded build info**
 
 ## Fleet agent / installer contract
 
+- Both installers run the agent as the VM's **main user** (default `exedev`,
+  override with `BOXEL_AGENT_USER` / `--user`) with that user's natural home
+  dir as `HOME` and default workspace — they do **not** create a dedicated
+  `boxel-agent` system user; don't reintroduce one (a hub_test.go assertion
+  guards against `useradd` in the installer script).
 - The default, installer-provisioned agent is a **single process**:
   `tunnel-mcp --hub-connect`, serving its MCP in-process over the reverse
   channel (no local port, no separate forwarder). The standalone `boxel-agent`

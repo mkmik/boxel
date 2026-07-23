@@ -265,12 +265,13 @@ Then on `SOME_VM`, once the integration is attached:
 curl -fsSL http://boxel.int.exe.xyz/install-agent | sudo bash
 ```
 
-The script installs a **single-process** agent: it builds `tunnel-mcp`,
-creates a `boxel-agent` system user with a jailed workspace
-(`/var/lib/boxel-agent/work` by default, override with `BOXEL_WORKSPACE`),
-and enables a `boxel-agent.service` running
-`tunnel-mcp --hub-connect` — one process that dials the hub and serves this
-VM's MCP in-process, with no local port and no separate forwarder. The unit
+The script installs a **single-process** agent: it builds `tunnel-mcp` and
+enables a `boxel-agent.service` running `tunnel-mcp --hub-connect` as the
+VM's **main user** (`exedev` by default, override with `BOXEL_AGENT_USER`;
+no dedicated service user is created), with that user's natural home
+directory as `HOME` and workspace jail (override with `BOXEL_WORKSPACE`) —
+one process that dials the hub and serves this VM's MCP in-process, with no
+local port and no separate forwarder. The unit
 deliberately carries **no systemd sandboxing** and the agent runs in
 **`bypassPermissions`** mode by default: the VM itself is the sandbox, and
 permission prompts would stall anyway on MCP clients without elicitation
@@ -366,7 +367,7 @@ Rules use Claude Code's `settings.json` format. Precedence is **deny > ask > all
 The generic `invoke` op is, by construction, an **authenticated RCE endpoint** — treat the whole design as "authenticated RCE with policy," not a typed API. **Authentication is the primary boundary; the permission engine is defense-in-depth and UX.** Deploy accordingly:
 
 - Front the HTTP transport with a TLS-terminating tunnel, and authenticate clients with OAuth — the built-in OIDC IDP (`--idp-issuer`) or the fronting layer's SSO. The built-in bearer token is a second factor and a local-testing convenience, not the production auth story.
-- Run the server as a dedicated **unprivileged** user, with the workspace on its own path and OS-level isolation (systemd sandboxing / bubblewrap / landlock) — *when the host machine is worth protecting*. Fleet agents installed via `/install-agent` deliberately skip systemd sandboxing and run `bypassPermissions`: there the entire disposable VM is the isolation boundary.
+- Run the server as a dedicated **unprivileged** user, with the workspace on its own path and OS-level isolation (systemd sandboxing / bubblewrap / landlock) — *when the host machine is worth protecting*. Fleet agents installed via `/install-agent` deliberately skip systemd sandboxing, run `bypassPermissions`, and run as the VM's main user in its own home directory: there the entire disposable VM is the isolation boundary.
 - Deny-by-default egress from the sandbox user (e.g. nftables per-UID) with a registry/GitHub allowlist, to bound exfiltration if a prompt-injected session goes rogue.
 - Every mutation is recorded in the audit log with an input digest and the permission decision; **file contents are never logged**, and Bash command lines flagged sensitive are redacted.
 

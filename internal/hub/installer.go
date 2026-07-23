@@ -64,8 +64,9 @@ var installerTmpl = template.Must(template.New("installer").Parse(`#!/usr/bin/en
 #
 # Installs boxel on this VM as a SINGLE pull-mode agent process:
 #   - builds tunnel-mcp with 'go install'
-#   - creates the unprivileged 'boxel-agent' service user and a jailed
-#     workspace
+#   - runs it as the VM's MAIN user (default: exedev, override with
+#     BOXEL_AGENT_USER) in that user's natural home directory — no dedicated
+#     service user is created
 #   - registers and starts a systemd unit (boxel-agent.service) running
 #     'tunnel-mcp --hub-connect': the process dials OUT to the hub and serves
 #     its MCP in-process over the reverse channel — no local port, no
@@ -85,14 +86,15 @@ var installerTmpl = template.Must(template.New("installer").Parse(`#!/usr/bin/en
 #   BOXEL_HUB_INTEGRATION  peer integration name to discover (default: boxel)
 #   BOXEL_AGENT_TOKEN      registration token           {{if .Token}}(embedded in this script){{else if .TokenRequired}}(REQUIRED: this copy was served unauthenticated){{else}}(not needed: the hub accepts exe.dev identity){{end}}
 #   BOXEL_AGENT_NAME       handle to register under     (default: short hostname; overridden by the platform-verified VM name on exe.dev)
-#   BOXEL_WORKSPACE        workspace jail root          (default: /var/lib/boxel-agent/work)
+#   BOXEL_AGENT_USER       user the agent runs as       (default: exedev — the VM's main user)
+#   BOXEL_WORKSPACE        workspace jail root          (default: the agent user's home directory)
 set -euo pipefail
 
 HUB_URL="${BOXEL_HUB_URL:-{{.HubURL}}}"
 HUB_INTEGRATION="${BOXEL_HUB_INTEGRATION:-}"
 AGENT_TOKEN="${BOXEL_AGENT_TOKEN:-{{.Token}}}"
 AGENT_NAME="${BOXEL_AGENT_NAME:-$(hostname -s | tr '[:upper:]' '[:lower:]')}"
-WORKSPACE="${BOXEL_WORKSPACE:-/var/lib/boxel-agent/work}"
+SERVICE_USER="${BOXEL_AGENT_USER:-exedev}"
 MODULE="{{.Module}}/cmd/tunnel-mcp@{{.ModuleVersion}}"
 
 {{if .TokenRequired -}}
@@ -112,17 +114,23 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 command -v systemctl >/dev/null 2>&1 || { echo "error: systemd is required" >&2; exit 1; }
 command -v go >/dev/null 2>&1 || { echo "error: Go toolchain not found (needed for 'go install'); install Go first" >&2; exit 1; }
+if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+  echo "error: user '$SERVICE_USER' not found. The agent runs as the VM's main user;" >&2
+  echo "pass the right one explicitly:" >&2
+  echo "  curl -fsSL {{.PublicURL}}{{"/install-agent"}} | sudo BOXEL_AGENT_USER=<user> bash" >&2
+  exit 1
+fi
+SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
+USER_HOME="$(getent passwd "$SERVICE_USER" | cut -d: -f6)"
+WORKSPACE="${BOXEL_WORKSPACE:-$USER_HOME}"
 
 echo "==> go install $MODULE"
 GOBIN=/usr/local/bin go install "$MODULE"
 
-echo "==> creating service user boxel-agent and workspace $WORKSPACE"
-if ! id boxel-agent >/dev/null 2>&1; then
-  useradd --system --user-group --no-create-home \
-    --home-dir /var/lib/boxel-agent --shell /usr/sbin/nologin boxel-agent
+echo "==> agent runs as $SERVICE_USER (home: $USER_HOME, workspace: $WORKSPACE)"
+if [ ! -d "$WORKSPACE" ]; then
+  install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$WORKSPACE"
 fi
-mkdir -p /var/lib/boxel-agent "$WORKSPACE"
-chown boxel-agent:boxel-agent /var/lib/boxel-agent "$WORKSPACE"
 
 echo "==> writing /etc/boxel-agent/env"
 mkdir -p /etc/boxel-agent
@@ -132,7 +140,7 @@ mkdir -p /etc/boxel-agent
   if [ -n "$AGENT_TOKEN" ]; then echo "BOXEL_AGENT_TOKEN=$AGENT_TOKEN"; fi
   echo "BOXEL_AGENT_NAME=$AGENT_NAME"
 } > /etc/boxel-agent/env
-chown root:boxel-agent /etc/boxel-agent /etc/boxel-agent/env
+chown "root:$SERVICE_GROUP" /etc/boxel-agent /etc/boxel-agent/env
 chmod 750 /etc/boxel-agent
 chmod 640 /etc/boxel-agent/env
 
@@ -144,10 +152,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=boxel-agent
-Group=boxel-agent
+User=$SERVICE_USER
+Group=$SERVICE_GROUP
 EnvironmentFile=/etc/boxel-agent/env
-Environment=HOME=/var/lib/boxel-agent
+Environment=HOME=$USER_HOME
 WorkingDirectory=$WORKSPACE
 ExecStart=/usr/local/bin/tunnel-mcp --hub-connect --workspace $WORKSPACE
 Restart=always
